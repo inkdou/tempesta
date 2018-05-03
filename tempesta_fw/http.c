@@ -29,6 +29,7 @@
 #include "http_limits.h"
 #include "client.h"
 #include "http_msg.h"
+#include "http_parser.h"
 #include "http_sess.h"
 #include "log.h"
 #include "procfs.h"
@@ -2644,6 +2645,113 @@ tfw_http_hm_drop_resp(TfwHttpResp *resp)
 	tfw_http_msg_free((TfwHttpMsg *)req);
 }
 
+static void
+tfw_http_skb_queue(TfwHttpMsg *hm, struct sk_buff *skb,
+		   tfw_http_parse_stage_t stage)
+{
+}
+
+/**
+ * Parse and add a new skb into current message.
+ *
+ * Before the call @skb is not attached to the message. If parsing succeed,
+ * @skb is either attached to the message and @skb pointer is set to NULL;
+ * or it's split into two parts, first is attached to the message, second is
+ * returned in @skb pointer.
+ */
+static int
+tfw_http_parse_skb(TfwConn *conn, struct sk_buff **skb, unsigned int *off,
+		   TfwFsmData *data_up)
+{
+	TfwHttpMsg *hm = (TfwHttpMsg *)conn->msg;
+	TfwHttpParser *parser = &hm->parser;
+	bool client = TFW_CONN_TYPE(conn) & Conn_Clnt;
+	ss_skb_actor_t actor = client ? tfw_http_parse_req : tfw_http_parse_resp;
+	tfw_http_parse_stage_t stage;
+	unsigned int data_off;
+	size_t to_read;
+	int r = TFW_BLOCK;
+
+repeat:
+	if (likely(tfw_cfg_proxy_buff_sz > hm->msg.len))
+		to_read = tfw_cfg_proxy_buff_sz - hm->msg.len;
+	else
+		to_read = ULONG_MAX;
+
+	/*
+	 * Process/parse data in the SKB.
+	 * @data_off points at the start of data for processing.
+	 * @off is the current offset of data to process in
+	 * the SKB. After processing @off points at the end
+	 * of latest data chunk. However processing may have
+	 * stopped in the middle of the chunk. Adjust it to point
+	 * to the right location within the chunk.
+	 */
+	stage = tfw_http_parse_stage(hm);
+	parser->skb = *skb;
+	data_off = *off;
+	r = ss_skb_process(*skb, off, to_read, actor, hm);
+	*off -= parser->to_go;
+	hm->msg.len += *off - data_off;
+	parser->skb = NULL;
+
+	if (client)
+		TFW_ADD_STAT_BH(*off - data_off, clnt.rx_bytes);
+	else
+		TFW_ADD_STAT_BH(*off - data_off, serv.rx_bytes);
+	TFW_DBG2("%s parsed: remain_len=%u parsed=%u msg_len=%zu"
+		 " ver=%d res=%d\n",
+		 (client ? "Request" : "Response"), (*skb)->len - *off,
+		 *off - data_off, hm->msg.len, hm->version, r);
+
+	if (unlikely(r == TFW_BLOCK))
+		return TFW_BLOCK;
+	if (hm->msg.len >= tfw_cfg_proxy_buff_sz)
+		hm->flags |= TFW_HTTP_F_STREAM;
+
+	/*
+	 * We have to keep @data the same to pass it as is to FSMs
+	 * registered with lower priorities after us, but we must
+	 * feed the new data version to FSMs registered on our states.
+	 */
+	data_up->skb = *skb;
+	data_up->off = data_off;
+	if (client) {
+		data_up->req = (TfwMsg *)hm;
+		data_up->resp = NULL;
+	}
+	else {
+		data_up->req = (TfwMsg *)hm->pair;
+		data_up->resp = (TfwMsg *)hm;
+	}
+
+	if (*off < (*skb)->len) {
+		struct sk_buff *nskb;
+		/*
+		 * Too long headers may overflow buffering limit. Don't split
+		 * skb until all the headers are processed.
+		 */
+		if (unlikely(tfw_http_parse_stage(hm) == TFW_HTTP_PARSE_HEADERS))
+			goto repeat;
+
+		TFW_DBG2("Split skb %p and add to message %p\n", *skb, hm);
+		tfw_http_skb_queue(hm, *skb, stage);
+		nskb = ss_skb_split(*skb, *off);
+		if (!nskb) {
+			*skb = NULL;
+			return TFW_BLOCK;
+		}
+		*skb = nskb;
+		*off = 0;
+	}
+	else {
+		TFW_DBG2("Add skb %p to message %p\n", *skb, hm);
+		tfw_http_skb_queue(hm, *skb, stage);
+		*skb = NULL;
+	}
+
+	return r;
+}
 /**
  * @return zero on success and negative value otherwise.
  * TODO enter the function depending on current GFSM state.

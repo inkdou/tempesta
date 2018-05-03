@@ -162,8 +162,9 @@ tfw_connection_send(TfwConn *conn, TfwMsg *msg)
 	skb = msg->skb_head;
 	do {
 		int ret;
-		ret = ss_skb_process(skb, &data_off, tfw_http_parse_resp,
-				     mock.resp);
+		mock.resp->parser.skb = skb;
+		ret = ss_skb_process(skb, &data_off, ULONG_MAX,
+				     tfw_http_parse_resp, mock.resp);
 		skb = skb->next;
 	} while (skb != msg->skb_head);
 
@@ -354,36 +355,9 @@ append_string_to_msg(TfwHttpMsg *hm, const char *s)
 }
 
 static int
-http_parse_helper(TfwHttpMsg *hm, ss_skb_actor_t actor)
-{
-	struct sk_buff *skb;
-	unsigned int off;
-
-	skb = hm->msg.skb_head;
-	BUG_ON(!skb);
-	off = 0;
-	while (1) {
-		switch (ss_skb_process(skb, &off, actor, hm)) {
-		case TFW_POSTPONE:
-			if (skb->next == hm->msg.skb_head)
-				return -1;
-			skb = skb->next;
-			continue;
-
-		case TFW_PASS:
-			/* sucessfully parsed */
-			return 0;
-
-		default:
-			return -1;
-		}
-	}
-}
-
-static int
 http_parse_req_helper(void)
 {
-	return http_parse_helper((TfwHttpMsg *)mock.req, tfw_http_parse_req);
+	return test_parse_helper((TfwHttpMsg *)mock.req, tfw_http_parse_req);
 }
 
 static int
@@ -398,7 +372,7 @@ http_parse_resp_helper(void)
 	TFW_STR_INIT(&mock.resp->body);
 	TFW_STR_INIT(&mock.resp->s_line);
 
-	return http_parse_helper((TfwHttpMsg *)mock.resp, tfw_http_parse_resp);
+	return test_parse_helper((TfwHttpMsg *)mock.resp, tfw_http_parse_resp);
 }
 
 TEST(http_sticky, sticky_get_absent)

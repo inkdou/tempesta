@@ -23,6 +23,7 @@
 
 #include "gfsm.h"
 #include "http_msg.h"
+#include "http_parser.h"
 #include "htype.h"
 
 /*
@@ -52,6 +53,8 @@ enum {
 	RGen_BodyReadChunk,
 	RGen_BodyEoL,
 	RGen_BodyCR,
+
+	RGen_Done,
 };
 
 /**
@@ -652,6 +655,21 @@ __hbh_parser_add_data(TfwHttpMsg *hm, char *data, unsigned long len, bool last)
 	return 0;
 }
 
+/**
+ * Current parsing stage: headers, body, trailer headers or parsing is finished.
+ */
+tfw_http_parse_stage_t
+tfw_http_parse_stage(TfwHttpMsg *hm)
+{
+	if (!(hm->crlf.flags & TFW_STR_F_COMPLETE))
+		return TFW_HTTP_PARSE_HEADERS;
+	if (!(hm->body.flags & TFW_STR_F_COMPLETE))
+		return TFW_HTTP_PARSE_BODY;
+	if (hm->parser.state == RGen_Done)
+		return TFW_HTTP_PARSE_DONE;
+	return TFW_HTTP_PARSE_TRAILER;
+}
+
 /* Helping (inferior) states to process particular parts of HTTP message. */
 enum {
 	I_0, /* initial state */
@@ -785,7 +803,8 @@ do {									\
 			msg->crlf.flags |= TFW_STR_F_COMPLETE;		\
 			__FSM_JMP(RGen_BodyInit);			\
 		}							\
-		FSM_EXIT(TFW_PASS);					\
+		p += 1;							\
+		__FSM_JMP(RGen_Done);					\
 	}								\
 } while (0)
 
@@ -802,7 +821,8 @@ __FSM_STATE(RGen_CRLFCR) {						\
 		__msg_field_finish(&msg->crlf, p + 1);			\
 		__FSM_JMP(RGen_BodyInit);				\
 	}								\
-	FSM_EXIT(TFW_PASS);						\
+	p += 1;								\
+	__FSM_JMP(RGen_Done);						\
 }
 
 /*
@@ -917,7 +937,7 @@ __FSM_STATE(RGen_HdrOtherN) {						\
 }									\
 __FSM_STATE(RGen_HdrOtherV) {						\
 	/*								\
-	 * The header content is opaqueue for us,			\
+	 * The header content is opaque for us,				\
 	 * so pass ctext and VCHAR.					\
 	 */								\
 	__FSM_MATCH_MOVE(ctext_vchar, RGen_HdrOtherV);			\
@@ -927,6 +947,26 @@ __FSM_STATE(RGen_HdrOtherV) {						\
 	mark_raw_hbh(msg, &parser->hdr);				\
 	__FSM_MOVE_n(RGen_EoL, __fsm_sz);				\
 }
+
+/*
+ * Same as __FSM_MOVE_nofixup, but exit with TFW_POSTPONE code if the
+ * message is processed in streaming mode. Required to split buffered part
+ * of the message (headers) from streaming (body) in cases when buffered
+ * part is too long and may overflow buffering limits.
+ */
+#define __FSM_MOVE_body_nofixup(to)					\
+do {									\
+	p += 1;								\
+	if (unlikely(msg->flags & TFW_HTTP_F_STREAM)) {			\
+		__fsm_const_state = to; /* start from state @to next time */\
+		__FSM_EXIT(TFW_SPLIT);					\
+	}								\
+	if (unlikely(__data_off(p) >= len)) {				\
+		__fsm_const_state = to; /* start from state @to next time */\
+		__FSM_EXIT(TFW_POSTPONE);				\
+	}								\
+	goto to;							\
+} while (0)
 
 /* Process according RFC 7230 3.3.3 */
 #define TFW_HTTP_INIT_REQ_BODY_PARSING()				\
@@ -941,7 +981,7 @@ __FSM_STATE(RGen_BodyInit) {						\
 		if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_CONTENT_LENGTH]))	\
 			TFW_PARSER_BLOCK(RGen_BodyInit);		\
 		if (msg->flags & TFW_HTTP_F_CHUNKED)			\
-			__FSM_MOVE_nofixup(RGen_BodyStart);		\
+			__FSM_MOVE_body_nofixup(RGen_BodyStart);	\
 		/*							\
 		 * TODO: If "Transfer-Encoding:" header is present and	\
 		 * there's NO "chunked" coding, then send 400 response	\
@@ -951,11 +991,12 @@ __FSM_STATE(RGen_BodyInit) {						\
 	}								\
 	if (msg->content_length) {					\
 		parser->to_read = msg->content_length;			\
-		__FSM_MOVE_nofixup(RGen_BodyStart);			\
+		__FSM_MOVE_body_nofixup(RGen_BodyStart);		\
 	}								\
 	/* There is no body. */						\
 	msg->body.flags |= TFW_STR_F_COMPLETE;				\
-	FSM_EXIT(TFW_PASS);						\
+	p += 1;								\
+	__FSM_JMP(RGen_Done);						\
 }
 
 /* Process according RFC 7230 3.3.3 */
@@ -969,25 +1010,27 @@ __FSM_STATE(RGen_BodyInit) {						\
 	/* There's no body. */						\
 	if (msg->flags & TFW_HTTP_F_VOID_BODY) {			\
 		msg->body.flags |= TFW_STR_F_COMPLETE;			\
-		FSM_EXIT(TFW_PASS);					\
+		p += 1;							\
+		__FSM_JMP(RGen_Done);					\
 	}								\
 	if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_TRANSFER_ENCODING])) {	\
 		/* The alternative: remove "Content-Length" header. */	\
 		if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_CONTENT_LENGTH]))	\
 			TFW_PARSER_BLOCK(RGen_BodyInit);		\
 		if (msg->flags & TFW_HTTP_F_CHUNKED)			\
-			__FSM_MOVE_nofixup(RGen_BodyStart);		\
-		__FSM_MOVE_nofixup(Resp_BodyUnlimStart);		\
+			__FSM_MOVE_body_nofixup(RGen_BodyStart);	\
+		__FSM_MOVE_body_nofixup(Resp_BodyUnlimStart);		\
 	}								\
 	if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_CONTENT_LENGTH]))		\
 	{								\
 		if (msg->content_length) {				\
 			parser->to_read = msg->content_length;		\
-			__FSM_MOVE_nofixup(RGen_BodyStart);		\
+			__FSM_MOVE_body_nofixup(RGen_BodyStart);	\
 		}							\
 		/* There is no body. */					\
 		msg->body.flags |= TFW_STR_F_COMPLETE;			\
-		FSM_EXIT(TFW_PASS);					\
+		p += 1;							\
+		__FSM_JMP(RGen_Done);					\
 	}								\
 	/* Process the body until the connection is closed. */		\
 	/*								\
@@ -997,7 +1040,8 @@ __FSM_STATE(RGen_BodyInit) {						\
 	 * Tempesta must use chunked transfer encoding for proxied	\
 	 * responses w/o lengths. Refer issue #534 for more information	\
 	 */								\
-	__FSM_MOVE_nofixup(Resp_BodyUnlimStart);			\
+	__fsm_const_state = Resp_BodyUnlimStart;			\
+	FSM_EXIT(TFW_SPLIT);						\
 }
 
 #define TFW_HTTP_PARSE_BODY_UNLIM()					\
@@ -1027,7 +1071,7 @@ __FSM_STATE(RGen_BodyChunk) {						\
 }									\
 __FSM_STATE(RGen_BodyReadChunk) {					\
 	BUG_ON(parser->to_read < 0);					\
-	__fsm_sz = min_t(long, parser->to_read, __data_remain(p));      \
+	__fsm_sz = min_t(long, parser->to_read, __data_remain(p));	\
 	parser->to_read -= __fsm_sz;					\
 	if (parser->to_read)						\
 		__FSM_MOVE_nf(RGen_BodyReadChunk, __fsm_sz, &msg->body); \
@@ -1040,8 +1084,7 @@ __FSM_STATE(RGen_BodyReadChunk) {					\
 		TFW_PARSER_BLOCK(RGen_BodyReadChunk);			\
 	msg->body.flags |= TFW_STR_F_COMPLETE;				\
 	p += __fsm_sz;							\
-	r = TFW_PASS;							\
-	goto done;							\
+	__FSM_JMP(RGen_Done);						\
 }									\
 __FSM_STATE(RGen_BodyChunkLen) {					\
 	__fsm_sz = __data_remain(p);					\
@@ -1086,7 +1129,13 @@ __FSM_STATE(RGen_BodyCR) {						\
 		TFW_PARSER_BLOCK(RGen_BodyCR);				\
 	msg->body.flags |= TFW_STR_F_COMPLETE;				\
 	/* Process the trailer-part. */					\
-	__FSM_MOVE_nofixup(RGen_Hdr);					\
+	__FSM_MOVE_body_nofixup(RGen_Hdr);				\
+}
+
+/* Parsing of current message is done, proceed to the next message. */
+#define TFW_HTTP_PARSE_DONE()						\
+__FSM_STATE(RGen_Done) {						\
+	__FSM_EXIT(TFW_PASS);						\
 }
 
 /*
@@ -3554,6 +3603,7 @@ tfw_http_parse_req(void *req_data, unsigned char *data, size_t len)
 
 	TFW_HTTP_INIT_REQ_BODY_PARSING();
 	TFW_HTTP_PARSE_BODY();
+	TFW_HTTP_PARSE_DONE();
 
 	/* ----------------    Improbable states    ---------------- */
 
@@ -4608,6 +4658,7 @@ tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len)
 	TFW_HTTP_INIT_RESP_BODY_PARSING();
 	TFW_HTTP_PARSE_BODY();
 	TFW_HTTP_PARSE_BODY_UNLIM();
+	TFW_HTTP_PARSE_DONE();
 
 	/* ----------------    Improbable states    ---------------- */
 
