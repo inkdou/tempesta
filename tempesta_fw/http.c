@@ -863,6 +863,8 @@ static inline void
 tfw_http_req_delist(TfwSrvConn *srv_conn, TfwHttpReq *req)
 {
 	spin_lock(&srv_conn->fwd_qlock);
+	if ((TfwMsg *)req == srv_conn->msg_sent)
+		srv_conn->msg_sent = __tfw_http_conn_msg_sent_prev(srv_conn);
 	__http_req_delist(srv_conn, req);
 	spin_unlock(&srv_conn->fwd_qlock);
 }
@@ -3441,7 +3443,7 @@ tfw_http_popreq(TfwHttpMsg *hmresp)
 
 	spin_lock(&srv_conn->fwd_qlock);
 	if ((TfwMsg *)req == srv_conn->msg_sent)
-		srv_conn->msg_sent = NULL;
+		srv_conn->msg_sent = __tfw_http_conn_msg_sent_prev(srv_conn);
 	__http_req_delist(srv_conn, req);
 	tfw_http_conn_nip_adjust(srv_conn);
 	/*
