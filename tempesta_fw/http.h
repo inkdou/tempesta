@@ -384,7 +384,6 @@ typedef struct {
  *
  * @st			- current processing state;
  * @body_off		- offset of current valid body part;
- * @stream_conn		- connection used to stream message;
  *
  * When the message is streamed, not all TfwStr chunks of hm->body are valid.
  * Previous chunks may be already sent and underlying skbs may be destroyed,
@@ -393,7 +392,6 @@ typedef struct {
 typedef struct {
 	unsigned int	st;
 	size_t		body_off;
-	TfwConn		*stream_conn;
 } TfwHttpMsgState;
 
 typedef struct tfw_http_msg_t	TfwHttpMsg;

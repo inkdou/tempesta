@@ -147,6 +147,7 @@ typedef struct {
  * @seq_qlock	- lock for accessing @seq_queue;
  * @ret_qlock	- lock for serializing sets of responses;
  * @msg_stream	- currently streamed response to client;
+ * @conn_stream	- server connection where current request is streamed to;
  */
 typedef struct {
 	TFW_CONN_COMMON;
@@ -154,6 +155,7 @@ typedef struct {
 	spinlock_t		seq_qlock;
 	spinlock_t		ret_qlock;
 	TfwMsg			*msg_stream;
+	TfwConn			*conn_stream;
 } TfwCliConn;
 
 /*

@@ -1189,10 +1189,13 @@ tfw_http_conn_msg_send(TfwSrvConn *conn, TfwHttpReq *req)
 	if (likely(!tfw_http_msg_is_streamed((TfwHttpMsg *)req)) || r)
 		return r;
 
-	req->state.stream_conn = (TfwConn *)conn;
+	((TfwCliConn *)req->conn)->conn_stream = (TfwConn *)conn;
 	/* Prevent multiple access with @tfw_http_req_process(). */
-	if (tfw_http_msg_is_processed((TfwHttpMsg *)req))
+	if (tfw_http_msg_is_processed((TfwHttpMsg *)req)) {
 		r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)req);
+		/* Streaming is done. No matter what was the return code. */
+		((TfwCliConn *)req->conn)->conn_stream = NULL;
+	}
 
 	return r;
 }
@@ -1211,15 +1214,11 @@ tfw_http_cli_conn_msg_send(TfwCliConn *conn, TfwHttpResp *resp)
 
 	conn->msg_stream = (TfwMsg *)resp;
 	/* Prevent multiple access with @tfw_http_req_process(). */
-	if (tfw_http_msg_is_processed((TfwHttpMsg *)resp))
+	if (tfw_http_msg_is_processed((TfwHttpMsg *)resp)) {
 		r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)resp);
-
-	/*
-	 * The function is called under TfwCliConn->ret_lock, it's safe to
-	 * modify last sent response.
-	 */
-	if (resp->flags & TFW_HTTP_F_STREAM_DONE)
+		/* Streaming is done. No matter what was the return code. */
 		conn->msg_stream = NULL;
+	}
 
 	return r;
 }
@@ -2378,7 +2377,12 @@ tfw_http_resp_fwd(TfwHttpResp *resp)
 			 "resp=[%p] and req=[%p]\n",
 			 __func__, cli_conn, resp, req);
 		ss_close_sync(cli_conn->sk, true);
-		tfw_http_resp_pair_free(req);
+		/* Don't destroy streamed response until streaming ended. */
+		if (!tfw_http_msg_is_streamed((TfwHttpMsg *)resp)
+		    || (resp->flags & TFW_HTTP_F_STREAM_DONE))
+		{
+			tfw_http_resp_pair_free(req);
+		}
 		TFW_INC_STAT_BH(serv.msgs_otherr);
 		return;
 	}
@@ -2798,10 +2802,13 @@ tfw_http_skb_queue(TfwHttpMsg *hm, struct sk_buff *skb,
 }
 
 static int
-tfw_http_stream_req(TfwHttpReq *req)
+tfw_http_stream_req(TfwCliConn *cli_conn, TfwHttpReq *req)
 {
-	TfwSrvConn *conn = (TfwSrvConn *)req->state.stream_conn;
-	int r = 0;
+	TfwSrvConn *conn = (TfwSrvConn *)cli_conn->conn_stream;
+	int r = -EINVAL;
+
+	if (!conn)
+		return 0;
 
 	TFW_DBG2("%s: resp=[%p]\n", __func__, req);
 
@@ -2812,7 +2819,7 @@ tfw_http_stream_req(TfwHttpReq *req)
 	if (!tfw_srv_conn_get_if_live(conn))
 		goto err;
 	tfw_cli_conn_mod_katimer((TfwCliConn *)req->conn);
-	r = __tfw_http_conn_stream(req->state.stream_conn, (TfwHttpMsg *)req);
+	r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)req);
 	tfw_srv_conn_put(conn);
 err:
 	spin_unlock(&conn->fwd_qlock);
@@ -3310,7 +3317,7 @@ next_req:
 	__HTTP_FSM_STATE(Http_Msg_Stream) {
 		int err;
 
-		err = tfw_http_stream_req(req);
+		err = tfw_http_stream_req((TfwCliConn *)conn, req);
 		if (err) {
 			TFW_INC_STAT_BH(clnt.msgs_otherr);
 			req->httperr.status = 500;
@@ -3532,6 +3539,9 @@ tfw_http_stream_resp(TfwHttpResp *resp)
 {
 	TfwCliConn *conn = (TfwCliConn *)resp->req->conn;
 	int r = 0;
+
+	if (!conn)
+		return 0;
 
 	TFW_DBG2("%s: resp=[%p]\n", __func__, resp);
 
