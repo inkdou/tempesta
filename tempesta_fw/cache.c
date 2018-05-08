@@ -422,6 +422,18 @@ tfw_cache_employ_resp(TfwHttpResp *resp)
 #undef CC_RESP_CACHEIT
 #undef CC_RESP_DONTCACHE
 #undef CC_REQ_DONTCACHE
+	/*
+	 * TODO: caching of streamed responses.
+	 * Streamed response can be cached, but at any time response can be
+	 * filtered by the frang. So serving streamed response from cache is
+	 * only possible after response is fully processed.
+	 * Size of streamed response is limited by 'proxy_buffering' directive
+	 * to avoid memory exhaustion. Cache entry size limit is required to
+	 * efficiently serve a lot of small responses and prevent from
+	 * cache memory stealing by a single long response (e.g. DVD image)
+	 */
+	if (resp->flags & TFW_HTTP_F_STREAM)
+		return false;
 
 	return true;
 }
