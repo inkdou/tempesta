@@ -1008,8 +1008,7 @@ __tfw_http_msg_alloc(int type, bool full)
 			tfw_http_init_parser_resp((TfwHttpResp *)hm);
 	}
 
-	hm->msg.head_skb = NULL;
-	spin_lock_init(&hm->msg.stream_lock);
+	hm->msg.head_skb = hm->msg.body_skb = hm->msg.trailer_skb = NULL;
 
 	if (type & Conn_Clnt) {
 		INIT_LIST_HEAD(&hm->msg.seq_list);

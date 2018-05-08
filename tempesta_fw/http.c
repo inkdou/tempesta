@@ -74,6 +74,8 @@ enum {
 	Http_Msg_Fwd,
 	/* Stream message. */
 	Http_Msg_Stream,
+	/* Streamed message processing ended, no multiple access may happen. */
+	Http_Msg_Stream_End,
 	/* Send response and drop connection if applicable. */
 	Http_Msg_Conn_Drop,
 };
@@ -84,7 +86,7 @@ enum {
 static inline bool
 tfw_http_msg_is_processed(TfwHttpMsg *msg)
 {
-	return (msg->state.st == Http_Msg_End);
+	return (msg->state.st == Http_Msg_Stream_End);
 }
 
 #define S_CRLFCRLF		"\r\n\r\n"
@@ -1136,8 +1138,7 @@ tfw_http_req_evict(TfwSrvConn *srv_conn, TfwServer *srv, TfwHttpReq *req,
 }
 
 /**
- * Send streamed message parts to target connection. The function must be
- * called under @hm.msg->stream_lock
+ * Send streamed message parts to target connection.
  */
 static int
 __tfw_http_conn_stream(TfwConn *conn, TfwHttpMsg *hm)
@@ -1146,10 +1147,6 @@ __tfw_http_conn_stream(TfwConn *conn, TfwHttpMsg *hm)
 	bool parsed;
 
 	TFW_DBG2("%s: stream msg=[%p] to conn=[%p]\n", __func__, hm, conn);
-
-	/* Only headers of streamed message are processed yet. */
-	if (tfw_http_msg_is_processed(hm) && (hm->state.st != Http_Msg_Stream))
-		return r;
 
 	parsed = (tfw_http_parse_stage(hm) == TFW_HTTP_PARSE_DONE);
 	/* Don't close connection until last skb is ready. */
@@ -1167,7 +1164,7 @@ __tfw_http_conn_stream(TfwConn *conn, TfwHttpMsg *hm)
 	 * Trailer headers can be adjusted before forwarding, don't send the
 	 * trailer skb before adjusting took place.
 	 */
-	if (tfw_http_msg_is_processed(hm) && hm->msg.trailer_skb) {
+	if (parsed && hm->msg.trailer_skb) {
 		TFW_DBG2("%s: stream trailer skb of msg=[%p]\n", __func__, hm);
 		r = tfw_connection_send(conn, &hm->msg.trailer_skb,
 					hm->msg.ss_flags);
@@ -1192,10 +1189,10 @@ tfw_http_conn_msg_send(TfwSrvConn *conn, TfwHttpReq *req)
 	if (likely(!tfw_http_msg_is_streamed((TfwHttpMsg *)req)) || r)
 		return r;
 
-	spin_lock(&req->msg.stream_lock);
 	req->state.stream_conn = (TfwConn *)conn;
-	r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)req);
-	spin_unlock(&req->msg.stream_lock);
+	/* Prevent multiple access with @tfw_http_req_process(). */
+	if (tfw_http_msg_is_processed((TfwHttpMsg *)req))
+		r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)req);
 
 	return r;
 }
@@ -1213,11 +1210,9 @@ tfw_http_cli_conn_msg_send(TfwCliConn *conn, TfwHttpResp *resp)
 		return r;
 
 	conn->msg_stream = (TfwMsg *)resp;
-
-	spin_lock(&resp->msg.stream_lock);
-	/* Only headers of streamed message is processed yet. */
-	r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)resp);
-	spin_unlock(&resp->msg.stream_lock);
+	/* Prevent multiple access with @tfw_http_req_process(). */
+	if (tfw_http_msg_is_processed((TfwHttpMsg *)resp))
+		r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)resp);
 
 	/*
 	 * The function is called under TfwCliConn->ret_lock, it's safe to
@@ -2013,11 +2008,8 @@ tfw_http_conn_drop(TfwConn *conn)
 	if (TFW_CONN_TYPE(conn) & Conn_Clnt) {
 		tfw_http_conn_cli_drop((TfwCliConn *)conn);
 	} else if (conn->msg) {		/* Conn_Srv */
-		spin_lock(&conn->msg->stream_lock);
 		if (tfw_http_parse_terminate((TfwHttpMsg *)conn->msg))
 			tfw_http_resp_terminate((TfwHttpMsg *)conn->msg);
-		else
-			spin_unlock(&conn->msg->stream_lock);
 	}
 	tfw_http_conn_msg_free((TfwHttpMsg *)conn->msg);
 }
@@ -2789,8 +2781,6 @@ tfw_http_skb_queue(TfwHttpMsg *hm, struct sk_buff *skb,
 		return;
 	}
 
-	spin_lock(&hm->msg.stream_lock);
-
 	switch (stage)
 	{
 	case TFW_HTTP_PARSE_HEADERS:
@@ -2805,8 +2795,6 @@ tfw_http_skb_queue(TfwHttpMsg *hm, struct sk_buff *skb,
 	default:
 		BUG();
 	}
-
-	spin_unlock(&hm->msg.stream_lock);
 }
 
 static int
@@ -2943,6 +2931,7 @@ static const char *__http_state_name_array[] = {
 	"Http_Msg_End",
 	"Http_Msg_Fwd",
 	"Http_Msg_Stream",
+	"Http_Msg_Stream_End",
 
 	"Http_Msg_Conn_Drop",
 };
@@ -2965,6 +2954,8 @@ switch(st)
  */
 #define __HTTP_FSM_FINISH(msg)						\
 done:									\
+	(msg)->state.st = __fsm_const_state;				\
+safe_done:								\
 	TFW_DBG3("Finish HTTP FSM at state %d = %s\n",			\
 		__fsm_const_state, __http_state_name(__fsm_const_state));\
 	/*								\
@@ -2976,7 +2967,6 @@ done:									\
 	if (r != TFW_BLOCK)						\
 		r = TFW_PASS;						\
 	TFW_DBG3("HTTP return %s\n", r == TFW_PASS ? "PASS" : "BLOCK");	\
-	(msg)->state.st = __fsm_const_state;
 
 #define __HTTP_FSM_STATE(st)						\
 case st:								\
@@ -2986,6 +2976,7 @@ st: __attribute__((unused))						\
 	__fsm_const_state = st; /* optimized out to constant */
 
 #define __HTTP_FSM_EXIT()	goto done;
+#define __HTTP_FSM_EXIT_safe()	goto safe_done;
 
 #define __HTTP_FSM_JUMP(to)	goto to;
 #define __HTTP_FSM_MOVE(to)						\
@@ -3030,6 +3021,10 @@ tfw_http_req_process(TfwConn *conn, const TfwFsmData *data)
 next_req:
 	req = (TfwHttpReq *)conn->msg;
 	hmreq = (TfwHttpMsg *)conn->msg;
+	/*
+	* Don't stream the message while parsing. Doesn't affect buffered
+	* messages.
+	*/
 	/* Process one message. */
 	while (skb && (r != TFW_PASS)) {
 		r = tfw_http_parse_skb(conn, &skb, &off, &data_up);
@@ -3261,7 +3256,7 @@ next_req:
 		 * more actions required.
 		 */
 		if (unlikely(stream_mode))
-			__HTTP_FSM_EXIT();
+			__HTTP_FSM_JUMP_EXIT(Http_Msg_Stream_End);
 
 		/*
 		 * Proxy mode: the request is fully buffered and processed,
@@ -3305,7 +3300,7 @@ next_req:
 		 */
 		if (unlikely(stream_mode))
 			__HTTP_FSM_JUMP(Http_Msg_Stream);
-		__HTTP_FSM_EXIT();
+		__HTTP_FSM_EXIT_safe();
 	}
 
 	/*
@@ -3641,6 +3636,7 @@ tfw_http_resp_process(TfwConn *conn, const TfwFsmData *data)
 next_resp:
 	resp = (TfwHttpResp *)conn->msg;
 	hmresp = (TfwHttpMsg *)conn->msg;
+	resp->state.body_off = resp->body.len;
 	/* Process one message. */
 	while (skb && (r != TFW_PASS)) {
 		r = tfw_http_parse_skb(conn, &skb, &off, &data_up);
@@ -3844,7 +3840,7 @@ next_resp:
 			if (resp->flags & TFW_HTTP_F_STREAM_DONE) {
 				list_del_init(&resp->req->msg.seq_list);
 				tfw_http_resp_pair_free(resp->req);
-				goto next;
+				__HTTP_FSM_EXIT_safe();
 			}
 			__HTTP_FSM_EXIT();
 		}
@@ -3877,7 +3873,7 @@ next_resp:
 
 		if (unlikely(stream_mode))
 			__HTTP_FSM_JUMP(Http_Msg_Stream);
-		__HTTP_FSM_EXIT();
+		__HTTP_FSM_EXIT_safe();
 	}
 
 	/*
@@ -3906,7 +3902,7 @@ next_resp:
 
 	__HTTP_FSM_FINISH(resp);
 	}
-next:
+
 	/* Switch connection to the new sibling message. */
 	if (hmsib) {
 		BUG_ON(!skb);

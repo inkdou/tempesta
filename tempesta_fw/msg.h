@@ -42,8 +42,6 @@
  *		  stores message trailer part. Trailer part contains headers,
  *		  which can be modified before forwarding, thus buffering of
  *		  trailer part is also required.
- * @stream_lock	- message is in stream mode, several threads may need write
- *		  access to @body_skb;
  * @len		- total message length;
  *
  * TODO: Currently seq_list is used only in requests. Responses are not
@@ -59,7 +57,6 @@ typedef struct {
 	struct sk_buff		*head_skb;
 	struct sk_buff		*body_skb;
 	struct sk_buff		*trailer_skb;
-	spinlock_t		stream_lock;
 	int			ss_flags;
 	size_t			len;
 } TfwMsg;
