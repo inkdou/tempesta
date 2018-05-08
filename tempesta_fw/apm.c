@@ -1233,43 +1233,55 @@ tfw_apm_hm_srv_rcount_update(TfwStr *uri_path, void *apmref)
 		atomic64_inc(&hmctl->rcount);
 }
 
-bool
-tfw_apm_hm_srv_alive(int status, TfwStr *body, void *apmref)
+int
+tfw_apm_hm_srv_check_headers(TfwHttpResp *resp, void *apmref)
 {
+	unsigned int status = resp->status;
 	TfwApmHM *hm = READ_ONCE(((TfwApmData *)apmref)->hmctl.hm);
-	u32 crc32 = 0;
 
 	BUG_ON(!hm);
 	if (hm->codes && !test_bit(HTTP_CODE_BIT_NUM(status), hm->codes)) {
 		TFW_WARN_NL("Response for health monitor '%s': status"
 			 " '%d' mismatched\n", hm->name, status);
-		return false;
+		return TFW_BLOCK;
 	}
 
-	if (!body->len) {
-		if (hm->crc32 != 0)
-			goto crc_err;
-		return true;
-	}
+	return TFW_PASS;
+}
 
+/*  */
+int
+tfw_apm_hm_srv_check_body(TfwHttpResp *resp, bool parsed, void *apmref)
+{
+	TfwApmHM *hm = READ_ONCE(((TfwApmData *)apmref)->hmctl.hm);
+	size_t off = resp->state.body_off;
+
+	BUG_ON(!hm);
+
+	if (!hm->crc32 && !hm->auto_crc)
+		return TFW_PASS;
+
+	resp->state.crc32 = __tfw_str_crc32_calc(&resp->body, off,
+						 resp->state.crc32);
+
+	if (!parsed)
+		return TFW_POSTPONE;
 	/*
 	 * Special case for 'auto' monitor: generate crc32
-	 * from body of first response and store it into monitor.
+	 * from body of the first response and store it into monitor.
 	 */
 	if (!hm->crc32 && hm->auto_crc) {
-		hm->crc32 = tfw_str_crc32_calc(body);
-	} else if (hm->crc32) {
-		crc32 = tfw_str_crc32_calc(body);
-		if (hm->crc32 != crc32)
-			goto crc_err;
+		hm->crc32 = resp->state.crc32;
+		return TFW_PASS;
 	}
+	if (hm->crc32 == resp->state.crc32)
+		return TFW_PASS;
 
-	return true;
-crc_err:
-	TFW_WARN_NL("Response for health monitor '%s': crc32"
-		 " value '%u' mismatched (expected value:"
-		 " '%u')\n", hm->name, crc32, hm->crc32);
-	return false;
+	TFW_WARN("Response for health monitor '%s': crc32 value "
+		 "'%u' mismatched (expected value: '%u')\n",
+		 hm->name, resp->state.crc32, hm->crc32);
+
+	return TFW_BLOCK;
 }
 
 bool

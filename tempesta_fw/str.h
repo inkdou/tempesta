@@ -402,7 +402,8 @@ bool tfw_str_eq_cstr_off(const TfwStr *str, ssize_t offset, const char *cstr,
 size_t tfw_str_to_cstr(const TfwStr *str, char *out_buf, int buf_size);
 
 TfwStr tfw_str_next_str_val(const TfwStr *str);
-u32 tfw_str_crc32_calc(const TfwStr *str);
+u32 __tfw_str_crc32_calc(const TfwStr *str, size_t off, u32 crc);
+#define tfw_str_crc32_calc(str) __tfw_str_crc32_calc((str), 0, 0)
 
 #ifdef DEBUG
 void tfw_str_dprint(const TfwStr *str, const char *msg);

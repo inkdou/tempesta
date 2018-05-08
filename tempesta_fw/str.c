@@ -765,18 +765,29 @@ EXPORT_SYMBOL(tfw_str_next_str_val);
  * Function for crc32 calculation from TfwStr object.
  */
 u32
-tfw_str_crc32_calc(const TfwStr *str)
+__tfw_str_crc32_calc(const TfwStr *str, size_t off, u32 crc)
 {
 	const TfwStr *c, *end;
-	u32 crc = 0;
+	const unsigned char *data;
+
+	if (!str->len)
+		return crc;
 
 	BUG_ON(str->len && !str->ptr);
-	TFW_STR_FOR_EACH_CHUNK(c, str, end)
-		crc = crc32(crc, c->ptr, c->len);
+	TFW_STR_FOR_EACH_CHUNK(c, str, end) {
+		if (off > c->len) {
+			off -= c->len;
+			continue;
+		}
+
+		data = (const unsigned char *)c->ptr + off;
+		crc = crc32(crc, data, c->len - off);
+		off = 0;
+	}
 
 	return crc;
 }
-EXPORT_SYMBOL(tfw_str_crc32_calc);
+EXPORT_SYMBOL(__tfw_str_crc32_calc);
 
 #ifdef DEBUG
 void

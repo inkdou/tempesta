@@ -384,6 +384,7 @@ typedef struct {
  *
  * @st			- current processing state;
  * @body_off		- offset of current valid body part;
+ * @crc32		- crc32 value for health monitoring;
  *
  * When the message is streamed, not all TfwStr chunks of hm->body are valid.
  * Previous chunks may be already sent and underlying skbs may be destroyed,
@@ -392,6 +393,7 @@ typedef struct {
 typedef struct {
 	unsigned int	st;
 	size_t		body_off;
+	u32		crc32;
 } TfwHttpMsgState;
 
 typedef struct tfw_http_msg_t	TfwHttpMsg;
@@ -620,6 +622,10 @@ void tfw_http_resp_fwd(TfwHttpResp *resp);
 void tfw_http_resp_build_error(TfwHttpReq *req);
 int tfw_cfgop_parse_http_status(const char *status, int *out);
 void tfw_http_hm_srv_send(TfwServer *srv, char *data, unsigned long len);
+
+/* APM functions. */
+int tfw_apm_hm_srv_check_headers(TfwHttpResp *resp, void *apmref);
+int tfw_apm_hm_srv_check_body(TfwHttpResp *resp, bool parsed, void *apmref);
 
 /*
  * Functions to send an HTTP error response to a client.

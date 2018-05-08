@@ -982,12 +982,16 @@ static void
 tfw_http_hm_control(TfwHttpResp *resp)
 {
 	TfwServer *srv = (TfwServer *)resp->conn->peer;
+	bool parsed;
 
 	if (tfw_http_hm_suspend(resp, srv))
 		return;
 
-	if (!tfw_srv_suspended(srv) ||
-	    !tfw_apm_hm_srv_alive(resp->status, &resp->body, srv->apmref))
+	parsed = (tfw_http_parse_stage((TfwHttpMsg *)resp)
+		  == TFW_HTTP_PARSE_DONE);
+	if (!tfw_srv_suspended(srv)
+	    || (tfw_apm_hm_srv_check_headers(resp, srv->apmref) == TFW_BLOCK)
+	    || (tfw_apm_hm_srv_check_body(resp, parsed, srv->apmref) == TFW_BLOCK))
 		return;
 
 	tfw_srv_mark_alive(srv);
@@ -3540,6 +3544,12 @@ tfw_http_stream_resp(TfwHttpResp *resp)
 	TfwCliConn *conn = (TfwCliConn *)resp->req->conn;
 	int r = 0;
 
+	/*
+	 * Verify response in context of http health monitor,
+	 * and mark server as disabled/enabled.
+	 */
+	tfw_http_hm_control(resp);
+
 	if (!conn)
 		return 0;
 
@@ -3757,7 +3767,7 @@ next_resp:
 		 * new requests to the server and forward all, probably error
 		 * responses, for queued requests to clients.
 		 */
-		tfw_http_hm_control((TfwHttpResp *)hmresp);
+		tfw_http_hm_control(resp);
 
 		/*
 		 * If the request's requested closing of connection after
