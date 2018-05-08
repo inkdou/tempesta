@@ -44,7 +44,11 @@
 #include "sock_srv.c"
 #include "client.c"
 #include "http_limits.c"
+
+/* rename original tfw_cli_conn_mod_katimer(), a custom version will be used here */
+#define tfw_cli_conn_mod_katimer	divert_tfw_cli_conn_mod_katimer
 #include "sock_clnt.c"
+#undef tfw_cli_conn_mod_katimer
 
 /* rename original tfw_http_resp_build_error(), a custom version will be used here */
 #define tfw_http_resp_build_error	divert_tfw_http_resp_build_error
@@ -182,7 +186,14 @@ tfw_connection_send(TfwConn *conn, struct sk_buff **skb_head, int flags)
 	return 0;
 }
 
-/* custom version for testing purposes */
+/* Custom version for testing purposes. */
+void
+tfw_cli_conn_mod_katimer(TfwCliConn *cli_conn)
+{
+	(void)cli_conn;
+}
+
+/* Custom version for testing purposes. */
 void
 tfw_http_resp_build_error(TfwHttpReq *req)
 {
