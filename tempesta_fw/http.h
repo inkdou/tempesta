@@ -294,10 +294,14 @@ enum {
 	TFW_HTTP_B_CONN_EXTRA,
 	/* Chunked transfer encoding. */
 	TFW_HTTP_B_CHUNKED,
+	/* Transform message to chunked transfer encoding. */
+	TFW_HTTP_B_CHUNKED_TRANSFORM,
 	/* Singular header presents more than once. */
 	TFW_HTTP_B_FIELD_DUPENTRY,
 	/* Message is processed in streaming mode. */
 	TFW_HTTP_B_STREAM,
+	/* Message is processed in streaming mode: Message is fully sent. */
+	TFW_HTTP_B_STREAM_DONE,
 
 	/* Request flags. */
 	TFW_HTTP_FLAGS_REQ,
@@ -330,6 +334,8 @@ enum {
 	TFW_HTTP_B_RESP_STALE,
 	/* Response is fully processed and ready to be forwarded to the client. */
 	TFW_HTTP_B_RESP_READY,
+	/* Message ends on connection closing. */
+	TFW_HTTP_B_MSG_LEN_UNKNOWN,
 
 	_TFW_HTTP_FLAGS_NUM
 };
@@ -340,8 +346,10 @@ enum {
 	(TFW_HTTP_F_CONN_KA | TFW_HTTP_F_CONN_CLOSE)
 #define TFW_HTTP_F_CONN_EXTRA		(1U << TFW_HTTP_B_CONN_EXTRA)
 #define TFW_HTTP_F_CHUNKED		(1U << TFW_HTTP_B_CHUNKED)
+#define TFW_HTTP_F_CHUNKED_TRANSFORM	(1U << TFW_HTTP_B_CHUNKED_TRANSFORM)
 #define TFW_HTTP_F_FIELD_DUPENTRY	(1U << TFW_HTTP_B_FIELD_DUPENTRY)
 #define TFW_HTTP_F_STREAM		(1U << TFW_HTTP_B_STREAM)
+#define TFW_HTTP_F_STREAM_DONE		(1U << TFW_HTTP_B_STREAM_DONE)
 
 #define TFW_HTTP_F_HAS_STICKY		(1U << TFW_HTTP_B_HAS_STICKY)
 #define TFW_HTTP_F_URI_FULL		(1U << TFW_HTTP_B_URI_FULL)
@@ -357,8 +365,9 @@ enum {
 #define TFW_HTTP_F_HDR_LMODIFIED	(1U << TFW_HTTP_B_HDR_LMODIFIED)
 #define TFW_HTTP_F_RESP_STALE		(1U << TFW_HTTP_B_RESP_STALE)
 #define TFW_HTTP_F_RESP_READY		(1U << TFW_HTTP_B_RESP_READY)
+#define TFW_HTTP_F_MSG_LEN_UNKNOWN	(1U << TFW_HTTP_B_MSG_LEN_UNKNOWN)
 
-/*
+/**
  * The structure to hold data for an HTTP error response.
  * An error response is sent later in an unlocked queue context.
  *
@@ -369,6 +378,23 @@ typedef struct {
 	const char	*reason;
 	unsigned short	status;
 }TfwHttpError;
+
+/**
+ * Message processing state.
+ *
+ * @st			- current processing state;
+ * @body_off		- offset of current valid body part;
+ * @stream_conn		- connection used to stream message;
+ *
+ * When the message is streamed, not all TfwStr chunks of hm->body are valid.
+ * Previous chunks may be already sent and underlying skbs may be destroyed,
+ * later chunks was not received yet.
+ */
+typedef struct {
+	unsigned int	st;
+	size_t		body_off;
+	TfwConn		*stream_conn;
+} TfwHttpMsgState;
 
 typedef struct tfw_http_msg_t	TfwHttpMsg;
 typedef struct tfw_http_req_t	TfwHttpReq;
@@ -382,6 +408,7 @@ typedef struct tfw_http_resp_t	TfwHttpResp;
  * @h_tbl		- table of message's HTTP headers in internal form;
  * @parser		- parser state data while a message is parsed;
  * @httperr		- HTTP error data used to form an error response;
+ * @state		- http processing state;
  * @pair		- the message paired with this one;
  * @req			- the request paired with this response;
  * @resp		- the response paired with this request;
@@ -399,15 +426,6 @@ typedef struct tfw_http_resp_t	TfwHttpResp;
  * @body		- pointer to the body of a message;
  *
  * TfwStr members must be the last for efficient scanning.
- *
- * NOTE: The space taken by @parser member is shared with @httperr member.
- * When a message results in an error, the parser state data is not used
- * anymore, so this is safe. The reason for reuse is that it's imperative
- * that saving the error data succeeds. If it fails, that will lead to
- * a request without a response - a hole in @seq_queue. Alternatively,
- * memory allocation from pool may fail, even if that's a rare case.
- * BUILD_BUG_ON() is used in tfw_http_init() to ensure that @httperr
- * doesn't make the whole structure bigger.
  */
 #define TFW_HTTP_MSG_COMMON						\
 	TfwMsg		msg;						\
@@ -418,10 +436,9 @@ typedef struct tfw_http_resp_t	TfwHttpResp;
 		TfwHttpReq	*req;					\
 		TfwHttpResp	*resp;					\
 	};								\
-	union {								\
-		TfwHttpParser	parser;					\
-		TfwHttpError	httperr;				\
-	};								\
+	TfwHttpParser	parser;						\
+	TfwHttpError	httperr;					\
+	TfwHttpMsgState	state;						\
 	TfwCacheControl	cache_ctl;					\
 	unsigned char	version;					\
 	unsigned int	flags;						\

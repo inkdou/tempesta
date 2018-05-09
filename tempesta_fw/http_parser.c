@@ -1049,12 +1049,12 @@ __FSM_STATE(RGen_BodyInit) {						\
 	}								\
 	/* Process the body until the connection is closed. */		\
 	/*								\
-	 * TODO: Currently Tempesta fully assembles response before	\
-	 * transmitting it to a client. This behaviour is considered	\
-	 * dangerous and the issue must be solved in generic way:	\
-	 * Tempesta must use chunked transfer encoding for proxied	\
-	 * responses w/o lengths. Refer issue #534 for more information	\
+	 * Fully assemble response with unknown length before		\
+	 * transmitting it to a client is considered dangerous.		\
+	 * Resolve the issue in generic way: use chunked transfer	\
+	 * encoding and stream the message to a client.			\
 	 */								\
+	msg->flags |= TFW_HTTP_F_MSG_LEN_UNKNOWN;			\
 	__fsm_const_state = Resp_BodyUnlimStart;			\
 	FSM_EXIT(TFW_SPLIT);						\
 }

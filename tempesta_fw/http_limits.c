@@ -721,7 +721,7 @@ int __fsm_const_state = Frang_Req_0; /* make compiler happy */
 switch(st)
 
 #if defined(DEBUG) && (DEBUG >= 3)
-const char *__state_name_array[] = {
+static const char *__frang_state_name_array[] = {
 	"Frang_Req_0",
 
 	"Frang_Req_Hdr_Start",
@@ -746,26 +746,28 @@ const char *__state_name_array[] = {
 	"Frang_Req_Done"
 };
 
-#define __state_name(state) ((state >= 0 && state <= Frang_Req_Done) ?	\
-				__state_name_array[state] :		\
-				"Wrong state")
+#define __frang_state_name(state)					\
+	((state >= 0 && state <= Frang_Req_Done)			\
+		? __frang_state_name_array[state]			 \
+		: "Wrong state")
 #endif /* defined(DEBUG) && (DEBUG >= 3) */
 
 /* NOTE: we use the fact, that if DEBUG < 3, TFW_DBG3() is empty, so
  * we can use it with undefined arguments, such as
- * __state_name(__fsm_const_state), which is defined only when DEBUG >= 3
+ * __frang_state_name(__fsm_const_state), which is defined only when DEBUG >= 3
  */
 #define __FRANG_FSM_FINISH()						\
 done:									\
 	TFW_DBG3("Finish FRANG FSM at state %d = %s\n",			\
-		__fsm_const_state, __state_name(__fsm_const_state));	\
+		__fsm_const_state, __frang_state_name(__fsm_const_state));\
 	TFW_DBG3("Frang return %s\n", r == TFW_PASS ? "PASS" : "BLOCK");\
 	req->frang_st = __fsm_const_state;
 
 #define __FRANG_FSM_STATE(st)						\
 case st:								\
 st: __attribute__((unused))						\
-	TFW_DBG3("enter FRANG FSM at state %d = %s\n", st, __state_name(st));\
+	TFW_DBG3("enter FRANG FSM at state %d = %s\n",			\
+		 st, __frang_state_name(st));				\
 	__fsm_const_state = st; /* optimized out to constant */
 
 #define __FRANG_FSM_EXIT()	goto done;
