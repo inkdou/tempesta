@@ -670,6 +670,19 @@ tfw_http_parse_stage(TfwHttpMsg *hm)
 	return TFW_HTTP_PARSE_TRAILER;
 }
 
+/**
+ * Mark header @hdr as trailer header.
+ *
+ * TODO: not all headers are allowed in the trailer part.
+ */
+static void
+mark_trailer_hdr(TfwHttpMsg *hm, TfwStr *hdr)
+{
+	if (unlikely(tfw_http_parse_stage(hm) == TFW_HTTP_PARSE_TRAILER))
+		hdr->flags |= TFW_STR_F_TRAILER_HDR;
+}
+
+
 /* Helping (inferior) states to process particular parts of HTTP message. */
 enum {
 	I_0, /* initial state */
@@ -866,6 +879,7 @@ __FSM_STATE(st_curr) {							\
 		/* The header value is fully parsed, move forward. */	\
 		if (saveval)						\
 			__msg_hdr_chunk_fixup(p, __fsm_n);		\
+		mark_trailer_hdr(msg, &parser->hdr);			\
 		parser->_i_st = RGen_EoL;				\
 		parser->_hdr_tag = id;					\
 		__FSM_MOVE_n(RGen_OWS, __fsm_n); /* skip OWS */		\
@@ -907,6 +921,7 @@ __FSM_STATE(st_curr) {							\
 		if (saveval)						\
 			__msg_hdr_chunk_fixup(p, __fsm_n);		\
 		mark_raw_hbh(msg, &parser->hdr);			\
+		mark_trailer_hdr(msg, &parser->hdr);			\
 		parser->_i_st = RGen_EoL;				\
 		parser->_hdr_tag = TFW_HTTP_HDR_RAW;			\
 		__FSM_MOVE_n(RGen_OWS, __fsm_n); /* skip OWS */		\
