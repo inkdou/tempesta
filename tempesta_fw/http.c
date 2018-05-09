@@ -777,7 +777,8 @@ tfw_http_conn_nip_adjust(TfwSrvConn *srv_conn)
 
 /*
  * Tell if the server connection's forwarding queue is on hold.
- * It's on hold it the request that was sent last was non-idempotent.
+ * It's on hold it the request that was sent last was non-idempotent or
+ * in streaming mode.
  */
 static inline bool
 tfw_http_conn_on_hold(TfwSrvConn *srv_conn)
@@ -785,7 +786,16 @@ tfw_http_conn_on_hold(TfwSrvConn *srv_conn)
 	TfwHttpReq *req_sent = (TfwHttpReq *)srv_conn->msg_sent;
 
 	BUG_ON(!(TFW_CONN_TYPE(srv_conn) & Conn_Srv));
-	return (req_sent && tfw_http_req_is_nip(req_sent));
+
+	if (!req_sent)
+		return false;
+	if (unlikely(tfw_http_req_is_nip(req_sent)))
+		return true;
+	if (unlikely(tfw_http_msg_is_streamed((TfwHttpMsg *)req_sent)
+		     && !(req_sent->flags & TFW_HTTP_F_STREAM_DONE)))
+		return true;
+
+	return false;
 }
 
 /*
@@ -1087,12 +1097,20 @@ static inline bool
 tfw_http_req_evict_retries(TfwSrvConn *srv_conn, TfwServer *srv,
 			   TfwHttpReq *req, struct list_head *eq)
 {
-	if (unlikely(req->retries++ >= srv->sg->max_refwd)) {
+	unsigned short max_refwd = srv->sg->max_refwd;
+
+	/*
+	 * Streamed request cant be sent more than once, Tempesta doesn't
+	 * keep it's full copy.
+	 */
+	if (unlikely(tfw_http_msg_is_streamed((TfwHttpMsg *)req)))
+		max_refwd = 1;
+
+	if (unlikely(req->retries++ >= max_refwd)) {
 		TFW_DBG2("%s: Eviction: req=[%p] retries=[%d]\n",
 			 __func__, req, req->retries);
 		tfw_http_req_err(srv_conn, req, eq, 504,
-				 "request evicted: the number"
-				 " of retries exceeded");
+				 "request evicted: the number of retries exceeded");
 		return true;
 	}
 	return false;
@@ -1771,7 +1789,7 @@ tfw_http_req_destruct(void *msg)
  * to and kept in @fwd_queue of the connection @conn for that server.
  * If a paired request is not found, then the response must be deleted.
  *
- * If a paired client request is missing, then it seems upsream server
+ * If a paired client request is missing, then it seems upstream server
  * is misbehaving, so the caller has to drop the server connection.
  *
  * Correct response parsing is only possible when request properties,
@@ -2321,7 +2339,12 @@ __tfw_http_resp_fwd(TfwCliConn *cli_conn, struct list_head *ret_queue)
 			return;
 		}
 		list_del_init(&req->msg.seq_list);
-		tfw_http_resp_pair_free(req);
+		/* Don't destroy streamed response until streaming ended. */
+		if (!tfw_http_msg_is_streamed(req->pair)
+		    || (req->pair->flags & TFW_HTTP_F_STREAM_DONE))
+		{
+			tfw_http_resp_pair_free(req);
+		}
 		TFW_INC_STAT_BH(serv.msgs_forwarded);
 	}
 }
@@ -2358,9 +2381,9 @@ tfw_http_resp_fwd(TfwHttpResp *resp)
 	if (unlikely(list_empty(seq_queue))) {
 		BUG_ON(!list_empty(&req->msg.seq_list));
 		spin_unlock_bh(&cli_conn->seq_qlock);
-		TFW_DBG2("%s: The client was disconnected, drop resp and req: "
-			 "conn=[%p]\n",
-			 __func__, cli_conn);
+		TFW_DBG2("%s: The client was disconnected conn=[%p], drop "
+			 "resp=[%p] and req=[%p]\n",
+			 __func__, cli_conn, resp, req);
 		ss_close_sync(cli_conn->sk, true);
 		tfw_http_resp_pair_free(req);
 		TFW_INC_STAT_BH(serv.msgs_otherr);
@@ -2368,11 +2391,21 @@ tfw_http_resp_fwd(TfwHttpResp *resp)
 	}
 	BUG_ON(list_empty(&req->msg.seq_list));
 	resp->flags |= TFW_HTTP_F_RESP_READY;
+	/* Last response was sent in streaming mode, hold on now. */
+	if (cli_conn->msg_stream) {
+		spin_unlock_bh(&cli_conn->seq_qlock);
+		return;
+	}
 	/* Move consecutive requests with @req->resp to @ret_queue. */
 	list_for_each_entry(req, seq_queue, msg.seq_list) {
 		if (!req->resp || !(req->resp->flags & TFW_HTTP_F_RESP_READY))
 			break;
 		req_retent = &req->msg.seq_list;
+		if (tfw_http_msg_is_streamed(req->pair)
+		    && !tfw_http_msg_is_processed(req->pair))
+		{
+			break;
+		}
 	}
 	if (!req_retent) {
 		spin_unlock_bh(&cli_conn->seq_qlock);
@@ -2817,7 +2850,23 @@ tfw_http_skb_queue(TfwHttpMsg *hm, struct sk_buff *skb,
 
 static int
 tfw_http_stream_req(TfwHttpReq *req)
+{
+	TfwSrvConn *conn = (TfwSrvConn *)req->state.stream_conn;
 	int r = 0;
+
+	TFW_DBG2("%s: resp=[%p]\n", __func__, req);
+
+	spin_lock(&conn->fwd_qlock);
+
+	if (!conn->msg_sent || ((TfwHttpReq *)conn->msg_sent != req))
+		goto err;
+	if (!tfw_srv_conn_get_if_live(conn))
+		goto err;
+	tfw_cli_conn_mod_katimer((TfwCliConn *)req->conn);
+	r = __tfw_http_conn_stream(req->state.stream_conn, (TfwHttpMsg *)req);
+	tfw_srv_conn_put(conn);
+err:
+	spin_unlock(&conn->fwd_qlock);
 
 	return r;
 }
@@ -3483,25 +3532,44 @@ tfw_http_resp_cache(TfwHttpMsg *hmresp)
 static int
 tfw_http_stream_resp(TfwHttpResp *resp)
 {
+	TfwCliConn *conn = (TfwCliConn *)resp->req->conn;
 	int r = 0;
 
-	/*
-	 * Complete HTTP message has been collected and processed
-	 * with success. Mark the message as complete in @conn as
-	 * further handling of @conn depends on that. Future SKBs
-	 * will be put in a new message.
-	 */
-	tfw_connection_unlink_msg(hmresp->conn);
-	if (tfw_cache_process(hmresp, tfw_http_resp_cache_cb))
-	{
-		tfw_http_conn_msg_free(hmresp);
-		tfw_http_send_resp(req, 500, "response dropped:"
-				   " processing error");
-		TFW_INC_STAT_BH(serv.msgs_otherr);
-		/* Proceed with processing of the next response. */
+	TFW_DBG2("%s: resp=[%p]\n", __func__, resp);
+
+	if (resp->flags & TFW_HTTP_F_CHUNKED_TRANSFORM) {
+		if ((r = tfw_http_msg_to_chunked(resp)))
+			return r;
 	}
 
-	return 0;
+	spin_lock(&conn->seq_qlock);
+
+	if (conn->msg_stream != (TfwMsg *)resp)
+		goto err;
+
+	/* Keep correct responses order, see comment in @tfw_http_resp_fwd(). */
+	spin_lock(&conn->ret_qlock);
+	/*
+	 * Response end was identified by connection close, but transforming
+	 * message to chunked encoding is not possible. No skb left to send
+	 * so close the client connection  manually.
+	 */
+	if (unlikely((resp->flags & TFW_HTTP_F_MSG_LEN_UNKNOWN)
+		     && !resp->msg.body_skb))
+	{
+		ss_close_sync(conn->sk, true);
+	}
+	else {
+		r = __tfw_http_conn_stream(resp->req->conn, (TfwHttpMsg *)resp);
+	}
+	if (resp->flags & TFW_HTTP_F_STREAM_DONE)
+		conn->msg_stream = NULL;
+	spin_unlock(&conn->ret_qlock);
+
+err:
+	spin_unlock(&conn->seq_qlock);
+
+	return r;
 }
 
 /*
@@ -3511,23 +3579,34 @@ static void
 tfw_http_resp_terminate(TfwHttpMsg *hm)
 {
 	TfwFsmData data;
+	int r;
 
 	/*
 	 * Note that in this case we don't have data to process.
-	 * All data has been processed already. The response needs
-	 * to go through Tempesta's post-processing, and then be
-	 * sent to the client. The full skb->len is used as the
-	 * offset to mark this case in the post-processing phase.
+	 * All data has been processed already. Most likely all previous
+	 * @hm.msg->body_skb was streamed to the client and freed.
+	 * Pass the response through Tempesta's post-processing and
+	 * indicate message end to the client: either send closing
+	 * last-chunk of body or close the client connection.
 	 */
-	data.skb = ss_skb_peek_tail(&hm->msg.skb_head);
-	BUG_ON(!data.skb);
-	data.off = data.skb->len;
-	data.req = NULL;
+	data.skb = NULL;
+	data.off = 0;
+	data.req = (TfwMsg *)hm->pair;
 	data.resp = (TfwMsg *)hm;
 
+	hm->state.st = Http_Msg_End;
 	if (tfw_http_resp_gfsm(hm, &data) != TFW_PASS)
 		return;
-	tfw_http_resp_cache(hm);
+
+	if ((r = tfw_http_stream_resp((TfwHttpResp *)hm))) {
+		TfwHttpReq *req = hm->req;
+
+		TFW_INC_STAT_BH(serv.msgs_otherr);
+		tfw_http_req_delist((TfwSrvConn *)hm->conn, req);
+		tfw_http_conn_msg_free(hm);
+		tfw_srv_client_drop(req, 502,
+				    "response dropped: processing error");
+	}
 }
 
 /**
