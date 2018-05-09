@@ -3069,30 +3069,10 @@ next_req:
 		case TFW_PASS:
 			BUG_ON(!(req->flags & TFW_HTTP_F_CHUNKED)
 			       && (req->content_length != req->body.len));
-
-			r = tfw_gfsm_move(&conn->state, TFW_HTTP_FSM_REQ_MSG,
-					  &data_up);
-			TFW_DBG3("TFW_HTTP_FSM_REQ_MSG return code %d\n", r);
-			if (r != TFW_BLOCK)
-				break;
-
-			TFW_INC_STAT_BH(clnt.msgs_filtout);
-			r = tfw_client_block(
-				req, 403,
-				"parsed request has been filtered out");
-			goto err;
-
+			break;
 		}
 	}
 	stream_mode = tfw_http_msg_is_streamed(hmreq);
-
-	/*
-	 * Message is not streamed and not parsed fully,
-	 * don't waste time in fsm.
-	 */
-	if (!tfw_http_msg_is_streamed(hmreq) && (r == TFW_POSTPONE) && !skb) {
-		return TFW_PASS;
-	}
 
 	/* At least part of request is parsed. */
 	__HTTP_FSM_START(req->state.st) {
@@ -3126,6 +3106,13 @@ next_req:
 
 	/* Headers are fully parsed, message processing can be started. */
 	__HTTP_FSM_STATE(Http_Msg_Headers) {
+		/* Assign the right Vhost for this request. */
+		if (tfw_http_req_set_context(req)) {
+			TFW_INC_STAT_BH(clnt.msgs_otherr);
+			req->httperr.status = 500;
+			req->httperr.reason = "cannot find Vhost for request";
+			__HTTP_FSM_JUMP(Http_Msg_Conn_Drop);
+		}
 		/*
 		 * In HTTP 0.9 the server always closes the connection
 		 * after sending the response.
@@ -3149,13 +3136,6 @@ next_req:
 			&& !(req->flags & __TFW_HTTP_MSG_M_CONN_MASK)))
 		{
 			req->flags |= TFW_HTTP_F_CONN_CLOSE;
-		}
-		/* Assign the right Vhost for this request. */
-		if (tfw_http_req_set_context(req)) {
-			TFW_INC_STAT_BH(clnt.msgs_otherr);
-			req->httperr.status = 500;
-			req->httperr.reason = "cannot find Vhost for request";
-			__HTTP_FSM_JUMP(Http_Msg_Conn_Drop);
 		}
 		/*
 		 * Sticky cookie module used for HTTP session identification
@@ -3213,6 +3193,17 @@ next_req:
 	/* Message is fully parsed. */
 	__HTTP_FSM_STATE(Http_Msg_End) {
 		bool req_conn_close;
+
+		r = tfw_gfsm_move(&conn->state, TFW_HTTP_FSM_REQ_MSG,
+				  &data_up);
+		TFW_DBG3("TFW_HTTP_FSM_REQ_MSG return code %d\n", r);
+		if (r == TFW_BLOCK) {
+			TFW_INC_STAT_BH(clnt.msgs_filtout);
+			req->httperr.status = 403;
+			req->httperr.reason =
+				"parsed request has been filtered out";
+			__HTTP_FSM_JUMP(Http_Msg_Conn_Drop);
+		}
 
 		/*
 		 * The request has been successfully parsed and processed.
