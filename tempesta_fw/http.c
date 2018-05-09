@@ -2339,10 +2339,12 @@ tfw_http_req_mark_error(TfwHttpReq *req, int status)
  * manner to delay its closing until transmission of error response
  * will be finished.
  */
-static void
+static int
 tfw_http_cli_error_resp_and_log(bool reply, bool nolog, TfwHttpReq *req,
 				int status, const char *msg)
 {
+	int r = TFW_BLOCK;
+
 	if (!nolog)
 		TFW_WARN_ADDR(msg, &req->conn->peer->addr);
 
@@ -2353,23 +2355,45 @@ tfw_http_cli_error_resp_and_log(bool reply, bool nolog, TfwHttpReq *req,
 		list_add_tail(&req->msg.seq_list, &cli_conn->seq_queue);
 		spin_unlock(&cli_conn->seq_qlock);
 		tfw_http_req_mark_error(req, status);
+		/*
+		 * Error message may not be sent immediately, some requests
+		 * in seq_queue may still wait for response from backend.
+		 * Close the connection when response to @req will be sent,
+		 * not earlier.
+		 */
+		r = TFW_PASS;
 	}
 	else {
 		tfw_http_conn_req_clean(req);
 	}
+
+	return r;
 }
 
-static void
+static int
 tfw_http_srv_error_resp_and_log(bool reply, bool nolog, TfwHttpReq *req,
 				int status, const char *msg)
 {
+	int r = TFW_BLOCK;
+
 	if (!nolog)
 		TFW_WARN_ADDR(msg, &req->conn->peer->addr);
 
-	if (reply)
+	if (reply) {
 		tfw_http_req_mark_error(req, status);
-	else
+		/*
+		 * Error message may not be sent immediately, some requests
+		 * in seq_queue may still wait for response from backend.
+		 * Close the connection when response to @req will be sent,
+		 * not earlier.
+		 */
+		r = TFW_PASS;
+	}
+	else {
 		tfw_http_conn_req_clean(req);
+	}
+
+	return r;
 }
 
 /**
@@ -2383,36 +2407,40 @@ tfw_http_srv_error_resp_and_log(bool reply, bool nolog, TfwHttpReq *req,
  * Otherwise tfw_srv_client_drop() and tfw_srv_client_block() must be used
  * only from server connection context.
  */
-static inline void
+static inline int
 tfw_client_drop(TfwHttpReq *req, int status, const char *msg)
 {
-	tfw_http_cli_error_resp_and_log(tfw_blk_flags & TFW_BLK_ERR_REPLY,
-					tfw_blk_flags & TFW_BLK_ERR_NOLOG,
-					req, status, msg);
+	return tfw_http_cli_error_resp_and_log(
+				tfw_blk_flags & TFW_BLK_ERR_REPLY,
+				tfw_blk_flags & TFW_BLK_ERR_NOLOG,
+				req, status, msg);
 }
 
-static inline void
+static inline int
 tfw_client_block(TfwHttpReq *req, int status, const char *msg)
 {
-	tfw_http_cli_error_resp_and_log(tfw_blk_flags & TFW_BLK_ATT_REPLY,
-					tfw_blk_flags & TFW_BLK_ATT_NOLOG,
-					req, status, msg);
+	return tfw_http_cli_error_resp_and_log(
+				tfw_blk_flags & TFW_BLK_ATT_REPLY,
+				tfw_blk_flags & TFW_BLK_ATT_NOLOG,
+				req, status, msg);
 }
 
-static inline void
+static inline int
 tfw_srv_client_drop(TfwHttpReq *req, int status, const char *msg)
 {
-	tfw_http_srv_error_resp_and_log(tfw_blk_flags & TFW_BLK_ERR_REPLY,
-					tfw_blk_flags & TFW_BLK_ERR_NOLOG,
-					req, status, msg);
+	return tfw_http_srv_error_resp_and_log(
+				tfw_blk_flags & TFW_BLK_ERR_REPLY,
+				tfw_blk_flags & TFW_BLK_ERR_NOLOG,
+				req, status, msg);
 }
 
-static inline void
+static inline int
 tfw_srv_client_block(TfwHttpReq *req, int status, const char *msg)
 {
-	tfw_http_srv_error_resp_and_log(tfw_blk_flags &	TFW_BLK_ATT_REPLY,
-					tfw_blk_flags & TFW_BLK_ATT_NOLOG,
-					req, status, msg);
+	return tfw_http_srv_error_resp_and_log(
+				tfw_blk_flags & TFW_BLK_ATT_REPLY,
+				tfw_blk_flags & TFW_BLK_ATT_NOLOG,
+				req, status, msg);
 }
 
 /**
