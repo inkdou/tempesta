@@ -321,7 +321,7 @@ tfw_http_msg_hdr_open(TfwHttpMsg *hm, unsigned char *hdr_start)
 	BUG_ON(!TFW_STR_EMPTY(hdr));
 
 	hdr->ptr = hdr_start;
-	hdr->skb = ss_skb_peek_tail(&hm->msg.skb_head);
+	hdr->skb = hm->parser.skb;
 
 	BUG_ON(!hdr->skb);
 
@@ -484,7 +484,7 @@ __hdr_add(TfwHttpMsg *hm, const TfwStr *hdr, unsigned int hid)
 	TfwStr it = {};
 	TfwStr *h = TFW_STR_CHUNK(&hm->crlf, 0);
 
-	r = ss_skb_get_room(hm->msg.skb_head, hm->crlf.skb, h->ptr,
+	r = ss_skb_get_room(hm->msg.head_skb, hm->crlf.skb, h->ptr,
 			    tfw_str_total_len(hdr), &it);
 	if (r)
 		return r;
@@ -521,7 +521,7 @@ __hdr_expand(TfwHttpMsg *hm, TfwStr *orig_hdr, const TfwStr *hdr, bool append)
 	BUG_ON(!append && (hdr->len < orig_hdr->len));
 
 	h = TFW_STR_LAST(orig_hdr);
-	r = ss_skb_get_room(hm->msg.skb_head, h->skb, (char *)h->ptr + h->len,
+	r = ss_skb_get_room(hm->msg.head_skb, h->skb, (char *)h->ptr + h->len,
 			    append ? hdr->len : hdr->len - orig_hdr->len, &it);
 	if (r)
 		return r;
@@ -546,7 +546,7 @@ __hdr_del(TfwHttpMsg *hm, unsigned int hid)
 
 	/* Delete the underlying data. */
 	TFW_STR_FOR_EACH_DUP(dup, hdr, end) {
-		if (ss_skb_cutoff_data(hm->msg.skb_head, dup, 0,
+		if (ss_skb_cutoff_data(hm->msg.head_skb, dup, 0,
 				       tfw_str_eolen(dup)))
 			return TFW_BLOCK;
 	};
@@ -589,7 +589,7 @@ __hdr_sub(TfwHttpMsg *hm, const TfwStr *hdr, unsigned int hid)
 		 * adjustment is needed.
 		 */
 		if (dst->len != hdr->len
-		    && ss_skb_cutoff_data(hm->msg.skb_head, dst, hdr->len, 0))
+		    && ss_skb_cutoff_data(hm->msg.head_skb, dst, hdr->len, 0))
 			return TFW_BLOCK;
 		if (tfw_strcpy(dst, hdr))
 			return TFW_BLOCK;
@@ -603,7 +603,7 @@ __hdr_sub(TfwHttpMsg *hm, const TfwStr *hdr, unsigned int hid)
 cleanup:
 	TFW_STR_FOR_EACH_DUP(tmp, orig_hdr, end) {
 		if (tmp != dst
-		    && ss_skb_cutoff_data(hm->msg.skb_head, tmp, 0,
+		    && ss_skb_cutoff_data(hm->msg.head_skb, tmp, 0,
 					  tfw_str_eolen(tmp)))
 			return TFW_BLOCK;
 	}
@@ -772,7 +772,7 @@ __msg_alloc_skb_data(TfwHttpMsg *hm, size_t len)
 		skb = ss_skb_alloc_pages(min(len, SS_SKB_MAX_DATA_LEN));
 		if (!skb)
 			return -ENOMEM;
-		ss_skb_queue_tail(&hm->msg.skb_head, skb);
+		ss_skb_queue_tail(&hm->msg.head_skb, skb);
 	}
 
 	return 0;
@@ -804,7 +804,7 @@ tfw_http_msg_setup(TfwHttpMsg *hm, TfwMsgIter *it, size_t data_len)
 	if ((ret = __msg_alloc_skb_data(hm, data_len)))
 		return ret;
 
-	it->skb = hm->msg.skb_head;
+	it->skb = hm->msg.head_skb;
 	it->frag = 0;
 
 	BUG_ON(!it->skb);
@@ -950,7 +950,9 @@ tfw_http_msg_free(TfwHttpMsg *m)
 		return;
 
 	tfw_http_msg_unpair(m);
-	ss_skb_queue_purge(&m->msg.skb_head);
+	ss_skb_queue_purge(&m->msg.head_skb);
+	ss_skb_queue_purge(&m->msg.body_skb);
+	ss_skb_queue_purge(&m->msg.trailer_skb);
 
 	if (m->destructor)
 		m->destructor(m);
@@ -1001,7 +1003,8 @@ __tfw_http_msg_alloc(int type, bool full)
 			tfw_http_init_parser_resp((TfwHttpResp *)hm);
 	}
 
-	hm->msg.skb_head = NULL;
+	hm->msg.head_skb = NULL;
+	spin_lock_init(&hm->msg.stream_lock);
 
 	if (type & Conn_Clnt) {
 		INIT_LIST_HEAD(&hm->msg.seq_list);

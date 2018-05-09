@@ -146,27 +146,26 @@ tfw_http_field_value(TfwHttpMsg *hm, const TfwStr *field_name, TfwStr *value)
 
 /* custom version for testing purposes */
 int
-tfw_connection_send(TfwConn *conn, TfwMsg *msg)
+tfw_connection_send(TfwConn *conn, struct sk_buff **skb_head, int flags)
 {
 	struct sk_buff *skb;
 	unsigned int data_off = 0;
 	const DEFINE_TFW_STR(s_set_cookie, "Set-Cookie:");
 	DEFINE_TFW_STR(hdr_value, NULL);
 
-	BUG_ON(!msg);
-	BUG_ON(!msg->skb_head);
+	BUG_ON(!*skb_head);
 	BUG_ON(!conn);
 
 	mock.tfw_connection_send_was_called += 1;
 
-	skb = msg->skb_head;
+	skb = *skb_head;
 	do {
 		int ret;
 		mock.resp->parser.skb = skb;
 		ret = ss_skb_process(skb, &data_off, ULONG_MAX,
 				     tfw_http_parse_resp, mock.resp);
 		skb = skb->next;
-	} while (skb != msg->skb_head);
+	} while (skb != *skb_head);
 
 	mock.http_status = mock.resp->status;
 
@@ -222,12 +221,12 @@ http_sticky_suite_setup(void)
 	skb = alloc_skb(PAGE_SIZE, GFP_ATOMIC);
 	BUG_ON(!skb);
 	skb_reserve(skb, MAX_TCP_HEADER);
-	ss_skb_queue_tail(&mock.req->msg.skb_head, skb);
+	ss_skb_queue_tail(&mock.req->msg.head_skb, skb);
 
 	skb = alloc_skb(PAGE_SIZE, GFP_ATOMIC);
 	BUG_ON(!skb);
 	skb_reserve(skb, MAX_TCP_HEADER);
-	ss_skb_queue_tail(&mock.resp->msg.skb_head, skb);
+	ss_skb_queue_tail(&mock.resp->msg.head_skb, skb);
 
 	tfw_connection_init(&mock.conn_req);
 	tfw_connection_init(&mock.conn_resp);
@@ -346,7 +345,7 @@ append_string_to_msg(TfwHttpMsg *hm, const char *s)
 	BUG_ON(!s);
 	len = strlen(s);
 
-	skb = hm->msg.skb_head;
+	skb = hm->msg.head_skb;
 	BUG_ON(!skb);
 
 	ptr = skb_put(skb, len);

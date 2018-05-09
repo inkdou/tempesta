@@ -679,6 +679,15 @@ tfw_http_req_is_nip(TfwHttpReq *req)
 }
 
 /*
+ * Check if a message is processed in stream mode.
+ */
+static inline bool
+tfw_http_msg_is_streamed(TfwHttpMsg *msg)
+{
+	return (msg->flags & TFW_HTTP_F_STREAM);
+}
+
+/*
  * Reset the flag saying that @srv_conn has non-idempotent requests.
  */
 static inline void
@@ -2062,7 +2071,7 @@ tfw_http_add_x_forwarded_for(TfwHttpMsg *hm)
 	int r;
 	char *p, *buf = *this_cpu_ptr(&g_buf);
 
-	p = ss_skb_fmt_src_addr(hm->msg.skb_head, buf);
+	p = ss_skb_fmt_src_addr(hm->msg.head_skb, buf);
 
 	r = tfw_http_msg_hdr_xfrm(hm, "X-Forwarded-For",
 				  sizeof("X-Forwarded-For") - 1, buf, p - buf,
@@ -2649,6 +2658,27 @@ static void
 tfw_http_skb_queue(TfwHttpMsg *hm, struct sk_buff *skb,
 		   tfw_http_parse_stage_t stage)
 {
+	if (!__tfw_http_msg_is_streamed(hm)) {
+		ss_skb_queue_tail(&hm->msg.head_skb, skb);
+		return;
+	}
+
+	spin_lock(&hm->msg.stream_lock);
+
+	switch (stage)
+	{
+	case TFW_HTTP_PARSE_HEADERS:
+		ss_skb_queue_tail(&hm->msg.head_skb, skb);
+		break;
+	case TFW_HTTP_PARSE_BODY:
+		ss_skb_queue_tail(&hm->msg.body_skb, skb);
+		break;
+	case TFW_HTTP_PARSE_TRAILER:
+		ss_skb_queue_tail(&hm->msg.trailer_skb, skb);
+		break;
+	default:
+		BUG();
+	}
 }
 
 /**
@@ -3420,9 +3450,6 @@ tfw_http_msg_process(void *conn, const TfwFsmData *data)
 		tfw_http_mark_wl_new_msg(c, (TfwHttpMsg *)c->msg, data->skb);
 		TFW_DBG2("Link new msg %p with connection %p\n", c->msg, c);
 	}
-
-	TFW_DBG2("Add skb %p to message %p\n", data->skb, c->msg);
-	ss_skb_queue_tail(&c->msg->skb_head, data->skb);
 
 	return (TFW_CONN_TYPE(c) & Conn_Clnt)
 		? tfw_http_req_process(c, data)
