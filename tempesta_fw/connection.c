@@ -94,9 +94,9 @@ tfw_connection_release(TfwConn *conn)
  * only on an active socket.
  */
 int
-tfw_connection_send(TfwConn *conn, TfwMsg *msg)
+tfw_connection_send(TfwConn *conn, struct sk_buff **skb_head, int flags)
 {
-	return TFW_CONN_HOOK_CALL(conn, conn_send, msg);
+	return TFW_CONN_HOOK_CALL(conn, conn_send, skb_head, flags);
 }
 
 int

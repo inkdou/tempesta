@@ -241,10 +241,10 @@ typedef struct {
 	void (*conn_release)(TfwConn *conn);
 
 	/*
-	 * Called by the connection layer when there is a message
-	 * that needs to be send.
+	 * Called by the connection layer when there is a data in
+	 * a message that needs to be send.
 	 */
-	int (*conn_send)(TfwConn *conn, TfwMsg *msg);
+	int (*conn_send)(TfwConn *conn, struct sk_buff **skb_head, int flags);
 } TfwConnHooks;
 
 #define TFW_CONN_MAX_PROTOS	TFW_GFSM_FSM_N
@@ -450,7 +450,7 @@ tfw_connection_validate_cleanup(TfwConn *conn)
 
 void tfw_connection_hooks_register(TfwConnHooks *hooks, int type);
 void tfw_connection_hooks_unregister(int type);
-int tfw_connection_send(TfwConn *conn, TfwMsg *msg);
+int tfw_connection_send(TfwConn *conn, struct sk_buff **skb_head, int flags);
 
 /* Generic helpers, used for both client and server connections. */
 void tfw_connection_init(TfwConn *conn);

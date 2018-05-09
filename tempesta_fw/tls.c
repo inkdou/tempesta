@@ -321,21 +321,21 @@ tfw_tls_conn_drop(TfwConn *c)
 }
 
 static int
-tfw_tls_conn_send(TfwConn *c, TfwMsg *msg)
+tfw_tls_conn_send(TfwConn *c,  struct sk_buff **skb_head, int flags)
 {
 	struct sk_buff *skb;
 	TfwTlsContext *tls = tfw_tls_context(c);
 
 	tls_dbg(c, "=>");
 
-	while ((skb = ss_skb_dequeue(&msg->skb_head))) {
+	while ((skb = ss_skb_dequeue(skb_head))) {
 		if (tfw_tls_send_skb(c, skb)) {
 			kfree_skb(skb);
 			return -EINVAL;
 		}
 	}
 
-	if (msg->ss_flags & SS_F_CONN_CLOSE)
+	if (flags & SS_F_CONN_CLOSE)
 		ttls_ssl_close_notify(tls);
 
 	return 0;

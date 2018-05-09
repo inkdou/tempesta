@@ -82,7 +82,7 @@ enum {
  * Check if a message is processed up to end.
  */
 static inline bool
-__tfw_http_msg_is_parsed(TfwHttpMsg *msg)
+tfw_http_msg_is_processed(TfwHttpMsg *msg)
 {
 	return (msg->state.st == Http_Msg_End);
 }
@@ -1115,6 +1115,100 @@ tfw_http_req_evict(TfwSrvConn *srv_conn, TfwServer *srv, TfwHttpReq *req,
 	       || tfw_http_req_evict_retries(srv_conn, srv, req, eq);
 }
 
+/**
+ * Send streamed message parts to target connection. The function must be
+ * called under @hm.msg->stream_lock
+ */
+static int
+__tfw_http_conn_stream(TfwConn *conn, TfwHttpMsg *hm)
+{
+	int r = 0, mask = ~SS_F_KEEP_SKB;
+	bool parsed;
+
+	TFW_DBG2("%s: stream msg=[%p] to conn=[%p]\n", __func__, hm, conn);
+
+	/* Only headers of streamed message are processed yet. */
+	if (tfw_http_msg_is_processed(hm) && (hm->state.st != Http_Msg_Stream))
+		return r;
+
+	parsed = (tfw_http_parse_stage(hm) == TFW_HTTP_PARSE_DONE);
+	/* Don't close connection until last skb is ready. */
+	if (!parsed || !hm->msg.trailer_skb)
+		mask = ~(SS_F_KEEP_SKB | SS_F_CONN_CLOSE);
+	if (hm->msg.body_skb) {
+		TFW_DBG2("%s: stream body skb of msg=[%p]\n", __func__, hm);
+		r = tfw_connection_send(conn, &hm->msg.body_skb,
+					hm->msg.ss_flags & mask);
+		if (r)
+			return r;
+	}
+
+	/*
+	 * Trailer headers can be adjusted before forwarding, don't send the
+	 * trailer skb before adjusting took place.
+	 */
+	if (tfw_http_msg_is_processed(hm) && hm->msg.trailer_skb) {
+		TFW_DBG2("%s: stream trailer skb of msg=[%p]\n", __func__, hm);
+		r = tfw_connection_send(conn, &hm->msg.trailer_skb,
+					hm->msg.ss_flags);
+		if (r)
+			return r;
+	}
+
+	if (parsed && !hm->msg.body_skb && !hm->msg.trailer_skb)
+		hm->flags |= TFW_HTTP_F_STREAM_DONE;
+
+	return r;
+}
+
+int
+tfw_http_conn_msg_send(TfwSrvConn *conn, TfwHttpReq *req)
+{
+	int r;
+
+	/* Send buffered message part */
+	r = tfw_connection_send((TfwConn *)conn, &req->msg.head_skb,
+				req->msg.ss_flags);
+	if (likely(!tfw_http_msg_is_streamed((TfwHttpMsg *)req)) || r)
+		return r;
+
+	spin_lock(&req->msg.stream_lock);
+	req->state.stream_conn = (TfwConn *)conn;
+	r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)req);
+	spin_unlock(&req->msg.stream_lock);
+
+	return r;
+}
+
+bool
+tfw_http_cli_conn_msg_send(TfwCliConn *conn, TfwHttpResp *resp)
+{
+	int r;
+
+	tfw_cli_conn_mod_katimer(conn);
+	/* Send buffered message part */
+	r = tfw_connection_send((TfwConn *)conn, &resp->msg.head_skb,
+				resp->msg.ss_flags);
+	if (likely(!tfw_http_msg_is_streamed((TfwHttpMsg *)resp)) || r)
+		return r;
+
+	conn->msg_stream = (TfwMsg *)resp;
+
+	spin_lock(&resp->msg.stream_lock);
+	/* Only headers of streamed message is processed yet. */
+	r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)resp);
+	spin_unlock(&resp->msg.stream_lock);
+
+	/*
+	 * The function is called under TfwCliConn->ret_lock, it's safe to
+	 * modify last sent response.
+	 */
+	if (resp->flags & TFW_HTTP_F_STREAM_DONE)
+		conn->msg_stream = NULL;
+
+	return r;
+}
+
 /*
  * If forwarding of @req to server @srv_conn is not successful, then
  * move it to the error queue @eq for sending an error response later.
@@ -1133,7 +1227,7 @@ tfw_http_req_fwd_send(TfwSrvConn *srv_conn, TfwServer *srv,
 	req->jtxtstamp = jiffies;
 	tfw_http_req_init_ss_flags(srv_conn, req);
 
-	if (tfw_connection_send((TfwConn *)srv_conn, (TfwMsg *)req)) {
+	if (tfw_http_conn_msg_send(srv_conn, req)) {
 		TFW_DBG2("%s: Forwarding error: conn=[%p] req=[%p]\n",
 			 __func__, srv_conn, req);
 		if (req->flags & TFW_HTTP_F_HMONITOR) {
@@ -1193,6 +1287,9 @@ tfw_http_conn_fwd_unsent(TfwSrvConn *srv_conn, struct list_head *eq)
 	list_for_each_entry_safe_from(req, tmp, fwd_queue, fwd_list) {
 		if (!tfw_http_req_fwd_single(srv_conn, srv, req, eq))
 			continue;
+		/* Stop forwarding if the request is in streaming. */
+		if (tfw_http_msg_is_streamed((TfwHttpMsg *)req))
+			break;
 		/* Stop forwarding if the request is non-idempotent. */
 		if (tfw_http_req_is_nip(req))
 			break;
@@ -1897,8 +1994,11 @@ tfw_http_conn_drop(TfwConn *conn)
 	if (TFW_CONN_TYPE(conn) & Conn_Clnt) {
 		tfw_http_conn_cli_drop((TfwCliConn *)conn);
 	} else if (conn->msg) {		/* Conn_Srv */
+		spin_lock(&conn->msg->stream_lock);
 		if (tfw_http_parse_terminate((TfwHttpMsg *)conn->msg))
 			tfw_http_resp_terminate((TfwHttpMsg *)conn->msg);
+		else
+			spin_unlock(&conn->msg->stream_lock);
 	}
 	tfw_http_conn_msg_free((TfwHttpMsg *)conn->msg);
 }
@@ -1909,9 +2009,9 @@ tfw_http_conn_drop(TfwConn *conn)
  * Called when the connection is used to send a message through.
  */
 static int
-tfw_http_conn_send(TfwConn *conn, TfwMsg *msg)
+tfw_http_conn_send(TfwConn *conn, struct sk_buff **skb_head, int flags)
 {
-	return ss_send(conn->sk, &msg->skb_head, msg->ss_flags);
+	return ss_send(conn->sk, skb_head, flags);
 }
 
 /**
@@ -2215,8 +2315,8 @@ __tfw_http_resp_fwd(TfwCliConn *cli_conn, struct list_head *ret_queue)
 
 	list_for_each_entry_safe(req, tmp, ret_queue, msg.seq_list) {
 		BUG_ON(!req->resp);
-		tfw_http_resp_init_ss_flags(req->resp, req);
-		if (tfw_cli_conn_send(cli_conn, (TfwMsg *)req->resp)) {
+		tfw_http_resp_init_ss_flags(req->resp);
+		if (tfw_http_cli_conn_msg_send(cli_conn, req->resp)) {
 			ss_close_sync(cli_conn->sk, true);
 			return;
 		}
