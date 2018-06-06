@@ -694,11 +694,8 @@ tfw_http_req_init_ss_flags(TfwSrvConn *srv_conn, TfwHttpReq *req)
 static inline void
 tfw_http_resp_init_ss_flags(TfwHttpResp *resp)
 {
-	if ((resp->req->flags & (TFW_HTTP_F_CONN_CLOSE | TFW_HTTP_F_SUSPECTED))
-	    || (resp->flags & TFW_HTTP_F_CONN_CLOSE))
-	{
+	if (resp->req->flags & (TFW_HTTP_F_CONN_CLOSE | TFW_HTTP_F_SUSPECTED))
 		((TfwMsg *)resp)->ss_flags |= SS_F_CONN_CLOSE;
-	}
 }
 
 /*
@@ -3742,18 +3739,18 @@ next_resp:
 		 * the body to chunked encoding, closing of the connection
 		 * means message end.
 		 */
-		if (unlikely(hmresp->flags & TFW_HTTP_F_MSG_LEN_UNKNOWN)
-		    && !(hmresp->req->flags & TFW_HTTP_F_CONN_CLOSE))
+		if (unlikely(resp->flags & TFW_HTTP_F_MSG_LEN_UNKNOWN)
+		    && !(resp->req->flags & TFW_HTTP_F_CONN_CLOSE))
 		{
 			/*
 			 * A server MUST NOT send a response containing
 			 * Transfer-Encoding unless the corresponding
 			 * request indicates HTTP/1.1 (or later).
 			 */
-			if (hmresp->req->version >= TFW_HTTP_VER_11)
-				hmresp->flags |= TFW_HTTP_F_CHUNKED_TRANSFORM;
+			if (resp->req->version >= TFW_HTTP_VER_11)
+				resp->flags |= TFW_HTTP_F_CHUNKED_TRANSFORM;
 			else
-				hmresp->flags |= TFW_HTTP_F_CONN_CLOSE;
+				resp->req->flags |= TFW_HTTP_F_CONN_CLOSE;
 		}
 
 		/*
