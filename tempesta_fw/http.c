@@ -57,8 +57,10 @@ static struct {
 	unsigned int sz;
 } tfw_wl_marks;
 
-/* Proxy buffering size. */
-static size_t tfw_cfg_proxy_buff_sz;
+/* Proxy buffering size for client connections. */
+static size_t tfw_cfg_cli_proxy_buff_sz;
+/* Proxy buffering size for server connections. */
+static size_t tfw_cfg_srv_proxy_buff_sz;
 
 #define S_CRLFCRLF		"\r\n\r\n"
 #define S_HTTP			"http://"
@@ -2833,7 +2835,10 @@ tfw_http_parse_skb(TfwConn *conn, struct sk_buff **skb, unsigned int *off,
 	TfwHttpMsg *hm = (TfwHttpMsg *)conn->msg;
 	TfwHttpParser *parser = &hm->parser;
 	bool client = TFW_CONN_TYPE(conn) & Conn_Clnt;
-	ss_skb_actor_t actor = client ? tfw_http_parse_req : tfw_http_parse_resp;
+	ss_skb_actor_t actor = client ? tfw_http_parse_req
+				      : tfw_http_parse_resp;
+	size_t proxy_buff_sz = client ? tfw_cfg_cli_proxy_buff_sz
+				      : tfw_cfg_srv_proxy_buff_sz;
 	tfw_http_parse_stage_t stage;
 	unsigned int data_off;
 	int r = TFW_BLOCK;
@@ -2866,7 +2871,7 @@ tfw_http_parse_skb(TfwConn *conn, struct sk_buff **skb, unsigned int *off,
 
 	if (unlikely(r == TFW_BLOCK))
 		return TFW_BLOCK;
-	if (hm->msg.len >= tfw_cfg_proxy_buff_sz)
+	if (hm->msg.len >= proxy_buff_sz)
 		hm->flags |= TFW_HTTP_F_STREAM;
 
 	/*
@@ -4037,7 +4042,7 @@ tfw_cfgop_cleanup_block_action(TfwCfgSpec *cs)
 }
 
 static int
-tfw_cfgop_proxy_buffering(TfwCfgSpec *cs, TfwCfgEntry *ce)
+tfw_cfgop_proxy_buffering(TfwCfgSpec *cs, TfwCfgEntry *ce, size_t *proxy_buff_sz)
 {
 	int r;
 	long val = 0;
@@ -4048,11 +4053,23 @@ tfw_cfgop_proxy_buffering(TfwCfgSpec *cs, TfwCfgEntry *ce)
 		return r;
 
 	if (val == -1)
-		tfw_cfg_proxy_buff_sz = LONG_MAX;
+		*proxy_buff_sz = LONG_MAX;
 	else
-		tfw_cfg_proxy_buff_sz = val;
+		*proxy_buff_sz = val;
 
 	return 0;
+}
+
+static int
+tfw_cfgop_cli_proxy_buffering(TfwCfgSpec *cs, TfwCfgEntry *ce)
+{
+	return tfw_cfgop_proxy_buffering(cs, ce, &tfw_cfg_cli_proxy_buff_sz);
+}
+
+static int
+tfw_cfgop_srv_proxy_buffering(TfwCfgSpec *cs, TfwCfgEntry *ce)
+{
+	return tfw_cfgop_proxy_buffering(cs, ce, &tfw_cfg_srv_proxy_buff_sz);
 }
 
 /* Macros specific to *_set_body() functions. */
@@ -4631,9 +4648,18 @@ static TfwCfgSpec tfw_http_specs[] = {
 		.cleanup = tfw_cfgop_cleanup_block_action,
 	},
 	{
-		.name = "proxy_buffering",
+		.name = "client_buffering",
 		.deflt = "10485760", /* 10 MB */
-		.handler = tfw_cfgop_proxy_buffering,
+		.handler = tfw_cfgop_cli_proxy_buffering,
+		.spec_ext = &(TfwCfgSpecInt) {
+			.range = { -1, LONG_MAX },
+		},
+		.allow_none = true,
+	},
+	{
+		.name = "server_buffering",
+		.deflt = "10485760", /* 10 MB */
+		.handler = tfw_cfgop_srv_proxy_buffering,
 		.spec_ext = &(TfwCfgSpecInt) {
 			.range = { -1, LONG_MAX },
 		},
