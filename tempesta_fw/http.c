@@ -2396,7 +2396,17 @@ tfw_http_resp_fwd(TfwHttpResp *resp)
 	list_for_each_entry(req, seq_queue, msg.seq_list) {
 		if (!req->resp || !(req->resp->flags & TFW_HTTP_F_RESP_READY))
 			break;
+		/*
+		 * Request is streamed, don't send reply until request is
+		 * fully received.
+		 */
+		if (tfw_http_msg_is_streamed((TfwHttpMsg *)req)
+		    && !tfw_http_msg_is_processed((TfwHttpMsg *)req))
+		{
+			break;
+		}
 		req_retent = &req->msg.seq_list;
+		/* Response streaming is processed in tfw_http_resp_process(). */
 		if (tfw_http_msg_is_streamed(req->pair)
 		    && !tfw_http_msg_is_processed(req->pair))
 		{
