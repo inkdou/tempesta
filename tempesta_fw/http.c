@@ -2809,7 +2809,7 @@ static int
 tfw_http_stream_req(TfwCliConn *cli_conn, TfwHttpReq *req)
 {
 	TfwSrvConn *conn = (TfwSrvConn *)cli_conn->conn_stream;
-	int r = -EINVAL;
+	int r = 0;
 
 	if (!conn)
 		return 0;
@@ -2818,10 +2818,12 @@ tfw_http_stream_req(TfwCliConn *cli_conn, TfwHttpReq *req)
 
 	spin_lock(&conn->fwd_qlock);
 
-	if (!conn->msg_sent || ((TfwHttpReq *)conn->msg_sent != req))
+	if ((TfwHttpReq *)conn->msg_sent != req)
 		goto err;
-	if (!tfw_srv_conn_get_if_live(conn))
+	if (!tfw_srv_conn_get_if_live(conn)) {
+		r = -EINVAL;
 		goto err;
+	}
 	tfw_cli_conn_mod_katimer((TfwCliConn *)req->conn);
 	r = __tfw_http_conn_stream((TfwConn *)conn, (TfwHttpMsg *)req);
 	tfw_srv_conn_put(conn);
