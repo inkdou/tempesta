@@ -109,7 +109,7 @@ test_parse_helper(TfwHttpMsg *hm, ss_skb_actor_t actor)
 	off = 0;
 	while (1) {
 		hm->parser.skb = skb;
-		switch (ss_skb_process(skb, &off, ULONG_MAX, actor, hm)) {
+		switch (ss_skb_process(skb, &off, actor, hm)) {
 		case TFW_POSTPONE:
 			if (skb->next == hm->msg.head_skb)
 				return -1;

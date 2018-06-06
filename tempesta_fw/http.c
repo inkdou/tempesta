@@ -2849,14 +2849,7 @@ tfw_http_parse_skb(TfwConn *conn, struct sk_buff **skb, unsigned int *off,
 	ss_skb_actor_t actor = client ? tfw_http_parse_req : tfw_http_parse_resp;
 	tfw_http_parse_stage_t stage;
 	unsigned int data_off;
-	size_t to_read;
 	int r = TFW_BLOCK;
-
-repeat:
-	if (likely(tfw_cfg_proxy_buff_sz > hm->msg.len))
-		to_read = tfw_cfg_proxy_buff_sz - hm->msg.len;
-	else
-		to_read = ULONG_MAX;
 
 	/*
 	 * Process/parse data in the SKB.
@@ -2870,7 +2863,7 @@ repeat:
 	stage = tfw_http_parse_stage(hm);
 	parser->skb = *skb;
 	data_off = *off;
-	r = ss_skb_process(*skb, off, to_read, actor, hm);
+	r = ss_skb_process(*skb, off, actor, hm);
 	*off -= parser->to_go;
 	hm->msg.len += *off - data_off;
 	parser->skb = NULL;
@@ -2907,12 +2900,6 @@ repeat:
 
 	if (*off < (*skb)->len) {
 		struct sk_buff *nskb;
-		/*
-		 * Too long headers may overflow buffering limit. Don't split
-		 * skb until all the headers are processed.
-		 */
-		if (unlikely(tfw_http_parse_stage(hm) == TFW_HTTP_PARSE_HEADERS))
-			goto repeat;
 
 		TFW_DBG2("Split skb %p and add to message %p\n", *skb, hm);
 		tfw_http_skb_queue(hm, *skb, stage);
@@ -2970,7 +2957,7 @@ safe_done:								\
 	TFW_DBG3("Finish HTTP FSM at state %d = %s\n",			\
 		__fsm_const_state, __http_state_name(__fsm_const_state));\
 	/*								\
-	 * TFW_POSTPONE/TFW_SPLIT status means that parsing succeeded	\
+	 * TFW_POSTPONE status means that parsing succeeded		\
 	 * but more data is needed to complete it. Lower layers		\
 	 * just supply data for parsing. They only want to know		\
 	 * if processing of a message should continue or not.		\
@@ -3032,45 +3019,36 @@ tfw_http_req_process(TfwConn *conn, const TfwFsmData *data)
 next_req:
 	req = (TfwHttpReq *)conn->msg;
 	hmreq = (TfwHttpMsg *)conn->msg;
-	/*
-	* Don't stream the message while parsing. Doesn't affect buffered
-	* messages.
-	*/
 	/* Process one message. */
-	while (skb && (r != TFW_PASS)) {
-		r = tfw_http_parse_skb(conn, &skb, &off, &data_up);
-		switch (r) {
-		default:
-			TFW_ERR("Unrecognized HTTP request parser return code "
-				"%d\n", r);
-			BUG();
-		case TFW_BLOCK:
-			TFW_DBG2("Block invalid HTTP request\n");
-			TFW_INC_STAT_BH(clnt.msgs_parserr);
-			r = tfw_client_drop(req, 400, "failed to parse request");
-			goto err;
+	r = tfw_http_parse_skb(conn, &skb, &off, &data_up);
+	switch (r) {
+	default:
+		TFW_ERR("Unrecognized HTTP request parser return code "
+			"%d\n", r);
+		BUG();
+	case TFW_BLOCK:
+		TFW_DBG2("Block invalid HTTP request\n");
+		TFW_INC_STAT_BH(clnt.msgs_parserr);
+		r = tfw_client_drop(req, 400, "failed to parse request");
+		goto err;
 
-		case TFW_SPLIT:
-		case TFW_POSTPONE:
-			r = tfw_gfsm_move(&conn->state, TFW_HTTP_FSM_REQ_CHUNK,
-					  &data_up);
-			TFW_DBG3("TFW_HTTP_FSM_REQ_CHUNK return code %d\n", r);
-			if (likely(r != TFW_BLOCK)) {
-				r = TFW_POSTPONE;
-				break;
-			}
-
+	case TFW_POSTPONE:
+		r = tfw_gfsm_move(&conn->state, TFW_HTTP_FSM_REQ_CHUNK,
+				  &data_up);
+		TFW_DBG3("TFW_HTTP_FSM_REQ_CHUNK return code %d\n", r);
+		if (r == TFW_BLOCK) {
 			TFW_INC_STAT_BH(clnt.msgs_filtout);
-			r = tfw_client_block(
-				req, 403,
-				"postponed request has been filtered out");
+			r = tfw_client_block(req, 403,
+					     "postponed request has been filtered out");
 			goto err;
-
-		case TFW_PASS:
-			BUG_ON(!(req->flags & TFW_HTTP_F_CHUNKED)
-			       && (req->content_length != req->body.len));
-			break;
 		}
+		r = TFW_POSTPONE;
+		break;
+
+	case TFW_PASS:
+		BUG_ON(!(req->flags & TFW_HTTP_F_CHUNKED)
+		       && (req->content_length != req->body.len));
+		break;
 	}
 	stream_mode = tfw_http_msg_is_streamed(hmreq);
 
@@ -3649,55 +3627,51 @@ next_resp:
 	hmresp = (TfwHttpMsg *)conn->msg;
 	resp->state.body_off = resp->body.len;
 	/* Process one message. */
-	while (skb && (r != TFW_PASS)) {
-		r = tfw_http_parse_skb(conn, &skb, &off, &data_up);
-		switch (r) {
-		default:
-			TFW_ERR("Unrecognized HTTP response parser return code"
-				" %d\n", r);
-			BUG();
-		case TFW_BLOCK:
-			/*
-			 * The response has not been fully parsed. There's no
-			 * choice but report a critical error. The lower layer
-			 * will close the connection and release the response
-			 * message, and well as all request messages that went
-			 * out on this connection and are waiting for paired
-			 * response messages.
-			 */
-			TFW_DBG2("Block invalid HTTP response\n");
-			TFW_INC_STAT_BH(serv.msgs_parserr);
-			goto bad_resp;
+	r = tfw_http_parse_skb(conn, &skb, &off, &data_up);
+	switch (r) {
+	default:
+		TFW_ERR("Unrecognized HTTP response parser return code"
+			" %d\n", r);
+		BUG();
+	case TFW_BLOCK:
+		/*
+		 * The response has not been fully parsed. There's no
+		 * choice but report a critical error. The lower layer
+		 * will close the connection and release the response
+		 * message, and well as all request messages that went
+		 * out on this connection and are waiting for paired
+		 * response messages.
+		 */
+		TFW_DBG2("Block invalid HTTP response\n");
+		TFW_INC_STAT_BH(serv.msgs_parserr);
+		goto bad_resp;
 
-		case TFW_SPLIT:
-		case TFW_POSTPONE:
-			r = tfw_gfsm_move(&conn->state, TFW_HTTP_FSM_RESP_CHUNK,
-					  &data_up);
-			TFW_DBG3("TFW_HTTP_FSM_RESP_CHUNK return code %d\n", r);
-			if (r != TFW_BLOCK) {
-				r = TFW_POSTPONE;
-				break;
-			}
-
+	case TFW_POSTPONE:
+		r = tfw_gfsm_move(&conn->state, TFW_HTTP_FSM_RESP_CHUNK,
+				  &data_up);
+		TFW_DBG3("TFW_HTTP_FSM_RESP_CHUNK return code %d\n", r);
+		if (unlikely(r == TFW_BLOCK)) {
 			TFW_INC_STAT_BH(serv.msgs_filtout);
 			filtout = true;
 			goto bad_resp;
-
-		case TFW_PASS:
-			/*
-			 * The response is fully parsed, fall through and
-			 * process it. If the response has broken length, then
-			 * block it (the server connection will be dropped).
-			 */
-			if (!(hmresp->flags & (TFW_HTTP_F_CHUNKED
-					       | TFW_HTTP_F_VOID_BODY))
-			    && (hmresp->content_length != hmresp->body.len))
-			{
-				TFW_INC_STAT_BH(serv.msgs_parserr);
-				goto bad_resp;
-			}
-			break;
 		}
+		r = TFW_POSTPONE;
+		break;
+
+	case TFW_PASS:
+		/*
+		 * The response is fully parsed, fall through and
+		 * process it. If the response has broken length, then
+		 * block it (the server connection will be dropped).
+		 */
+		if (!(hmresp->flags & (TFW_HTTP_F_CHUNKED
+				       | TFW_HTTP_F_VOID_BODY))
+		    && (hmresp->content_length != hmresp->body.len))
+		{
+			TFW_INC_STAT_BH(serv.msgs_parserr);
+			goto bad_resp;
+		}
+		break;
 	}
 	stream_mode = tfw_http_msg_is_streamed(hmresp);
 	/*

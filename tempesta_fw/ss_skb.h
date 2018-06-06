@@ -35,11 +35,9 @@ enum {
 	 * This code means that we can't finish requested operation due to
 	 * shutdown process, but this isn't error.
 	 */
-	SS_SHUTDOWN	= -5,
+	SS_SHUTDOWN	= -4,
 	/* Generic socket error. */
-	SS_BAD		= -4,
-	/* Packet must be split. */
-	SS_SPLIT	= -3,
+	SS_BAD		= -3,
 	/* The packet must be dropped. */
 	SS_DROP		= -2,
 	/* The packet should be stashed (made by callback). */
@@ -187,7 +185,7 @@ int ss_skb_get_room(struct sk_buff *skb_head, struct sk_buff *skb,
 int ss_skb_cutoff_data(struct sk_buff *skb_head, const TfwStr *hdr,
 		       int skip, int tail);
 
-int ss_skb_process(struct sk_buff *skb, unsigned int *off, size_t max_read,
+int ss_skb_process(struct sk_buff *skb, unsigned int *off,
 		   ss_skb_actor_t actor, void *objdata);
 
 int ss_skb_unroll(struct sk_buff **skb_head, struct sk_buff *skb);

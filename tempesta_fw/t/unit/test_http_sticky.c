@@ -162,8 +162,8 @@ tfw_connection_send(TfwConn *conn, struct sk_buff **skb_head, int flags)
 	do {
 		int ret;
 		mock.resp->parser.skb = skb;
-		ret = ss_skb_process(skb, &data_off, ULONG_MAX,
-				     tfw_http_parse_resp, mock.resp);
+		ret = ss_skb_process(skb, &data_off, tfw_http_parse_resp,
+				     mock.resp);
 		skb = skb->next;
 	} while (skb != *skb_head);
 

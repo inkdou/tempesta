@@ -963,26 +963,6 @@ __FSM_STATE(RGen_HdrOtherV) {						\
 	__FSM_MOVE_n(RGen_EoL, __fsm_sz);				\
 }
 
-/*
- * Same as __FSM_MOVE_nofixup, but exit with TFW_POSTPONE code if the
- * message is processed in streaming mode. Required to split buffered part
- * of the message (headers) from streaming (body) in cases when buffered
- * part is too long and may overflow buffering limits.
- */
-#define __FSM_MOVE_body_nofixup(to)					\
-do {									\
-	p += 1;								\
-	if (unlikely(msg->flags & TFW_HTTP_F_STREAM)) {			\
-		__fsm_const_state = to; /* start from state @to next time */\
-		__FSM_EXIT(TFW_SPLIT);					\
-	}								\
-	if (unlikely(__data_off(p) >= len)) {				\
-		__fsm_const_state = to; /* start from state @to next time */\
-		__FSM_EXIT(TFW_POSTPONE);				\
-	}								\
-	goto to;							\
-} while (0)
-
 /* Process according RFC 7230 3.3.3 */
 #define TFW_HTTP_INIT_REQ_BODY_PARSING()				\
 __FSM_STATE(RGen_BodyInit) {						\
@@ -996,7 +976,7 @@ __FSM_STATE(RGen_BodyInit) {						\
 		if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_CONTENT_LENGTH]))	\
 			TFW_PARSER_BLOCK(RGen_BodyInit);		\
 		if (msg->flags & TFW_HTTP_F_CHUNKED)			\
-			__FSM_MOVE_body_nofixup(RGen_BodyStart);	\
+			__FSM_MOVE_nofixup(RGen_BodyStart);		\
 		/*							\
 		 * TODO: If "Transfer-Encoding:" header is present and	\
 		 * there's NO "chunked" coding, then send 400 response	\
@@ -1006,7 +986,7 @@ __FSM_STATE(RGen_BodyInit) {						\
 	}								\
 	if (msg->content_length) {					\
 		parser->to_read = msg->content_length;			\
-		__FSM_MOVE_body_nofixup(RGen_BodyStart);		\
+		__FSM_MOVE_nofixup(RGen_BodyStart);			\
 	}								\
 	/* There is no body. */						\
 	msg->body.flags |= TFW_STR_F_COMPLETE;				\
@@ -1033,14 +1013,14 @@ __FSM_STATE(RGen_BodyInit) {						\
 		if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_CONTENT_LENGTH]))	\
 			TFW_PARSER_BLOCK(RGen_BodyInit);		\
 		if (msg->flags & TFW_HTTP_F_CHUNKED)			\
-			__FSM_MOVE_body_nofixup(RGen_BodyStart);	\
-		__FSM_MOVE_body_nofixup(Resp_BodyUnlimStart);		\
+			__FSM_MOVE_nofixup(RGen_BodyStart);		\
+		__FSM_MOVE_nofixup(Resp_BodyUnlimStart);		\
 	}								\
 	if (!TFW_STR_EMPTY(&tbl[TFW_HTTP_HDR_CONTENT_LENGTH]))		\
 	{								\
 		if (msg->content_length) {				\
 			parser->to_read = msg->content_length;		\
-			__FSM_MOVE_body_nofixup(RGen_BodyStart);	\
+			__FSM_MOVE_nofixup(RGen_BodyStart);		\
 		}							\
 		/* There is no body. */					\
 		msg->body.flags |= TFW_STR_F_COMPLETE;			\
@@ -1055,8 +1035,7 @@ __FSM_STATE(RGen_BodyInit) {						\
 	 * encoding and stream the message to a client.			\
 	 */								\
 	msg->flags |= TFW_HTTP_F_MSG_LEN_UNKNOWN;			\
-	__fsm_const_state = Resp_BodyUnlimStart;			\
-	FSM_EXIT(TFW_SPLIT);						\
+	__FSM_MOVE_nofixup(Resp_BodyUnlimStart);			\
 }
 
 #define TFW_HTTP_PARSE_BODY_UNLIM()					\
@@ -1144,7 +1123,7 @@ __FSM_STATE(RGen_BodyCR) {						\
 		TFW_PARSER_BLOCK(RGen_BodyCR);				\
 	msg->body.flags |= TFW_STR_F_COMPLETE;				\
 	/* Process the trailer-part. */					\
-	__FSM_MOVE_body_nofixup(RGen_Hdr);				\
+	__FSM_MOVE_nofixup(RGen_Hdr);					\
 }
 
 /* Parsing of current message is done, proceed to the next message. */

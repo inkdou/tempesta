@@ -873,39 +873,28 @@ ss_skb_cutoff_data(struct sk_buff *skb_head, const TfwStr *hdr, int skip,
  * @return SS_OK, SS_DROP, SS_POSTPONE, or a negative value of error code.
  *
  * The function is unaware of an application layer, but it still splits
- * @skb into messages.
- * If @actor returns PASS then current message is ended and upper level can
- * split @skb at @off.
- * If @actor returns POSTPONE and there is more data in @skb, then the function
- * continues @skb processing to allow upper level to process a full message
- * as one piece.
- * If @actor returns SPLIT, then the code is returned to upper level to
- * intentionally spit @skb in the middle of the message.
- * Otherwise error code is returned to upper level.
- *
- * @off		- iterator between function calls over the same @skb;
- * @max_read	- maximum allowed message part size;
- * @actor	- application level aware parser function;
- * @objdata	- opaque pointer for @actor.
+ * @skb into messages. If @actor returns POSTPONE and there is more data
+ * in @skb, then the function continues to process the @skb. Otherwise
+ * it returns, thus allowing an upper layer to process a full message
+ * or an error code. @off is used as an iterator between function calls
+ * over the same @skb.
  *
  * FIXME it seems standard skb_seq_read() does the same.
  */
 int
-ss_skb_process(struct sk_buff *skb, unsigned int *off, size_t max_read,
-	       ss_skb_actor_t actor, void *objdata)
+ss_skb_process(struct sk_buff *skb, unsigned int *off, ss_skb_actor_t actor,
+	       void *objdata)
 {
 	int i, r = SS_OK;
-	size_t headlen = skb_headlen(skb);
+	int headlen = skb_headlen(skb);
 	unsigned int offset = *off;
 	struct skb_shared_info *si = skb_shinfo(skb);
 
 	/* Process linear data. */
 	if (offset < headlen) {
-		size_t to_read = min(headlen - offset, max_read);
-		*off += to_read;
-		max_read -= to_read;
-		r = actor(objdata, skb->data + offset, to_read);
-		if ((r != SS_POSTPONE) || !max_read)
+		*off = headlen;
+		r = actor(objdata, skb->data + offset, headlen - offset);
+		if (r != SS_POSTPONE)
 			return r;
 		offset = 0;
 	} else {
@@ -918,15 +907,13 @@ ss_skb_process(struct sk_buff *skb, unsigned int *off, size_t max_read,
 	 */
 	for (i = 0; i < si->nr_frags; ++i) {
 		const skb_frag_t *frag = &si->frags[i];
-		size_t frag_size = skb_frag_size(frag);
+		unsigned int frag_size = skb_frag_size(frag);
 		if (offset < frag_size) {
-			size_t to_read = min(frag_size - offset, max_read);
 			unsigned char *frag_addr = skb_frag_address(frag);
-
-			*off += to_read;
-			max_read -= to_read;
-			r = actor(objdata, frag_addr + offset, to_read);
-			if ((r != SS_POSTPONE) || !max_read)
+			*off += frag_size - offset;
+			r = actor(objdata, frag_addr + offset,
+					   frag_size - offset);
+			if (r != SS_POSTPONE)
 				return r;
 			offset = 0;
 		} else {
