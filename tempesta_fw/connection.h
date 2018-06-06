@@ -148,6 +148,9 @@ typedef struct {
  * @ret_qlock	- lock for serializing sets of responses;
  * @msg_stream	- currently streamed response to client;
  * @conn_stream	- server connection where current request is streamed to;
+ * @recv_window_sz - maximum size of memory used to store requests, used for
+ *		     receive window size steering;
+ * @buff_sz	- current size of memory used to store requests;
  */
 typedef struct {
 	TFW_CONN_COMMON;
@@ -156,6 +159,8 @@ typedef struct {
 	spinlock_t		ret_qlock;
 	TfwMsg			*msg_stream;
 	TfwConn			*conn_stream;
+	size_t			recv_window_sz;
+	size_t			buff_sz;
 } TfwCliConn;
 
 /*

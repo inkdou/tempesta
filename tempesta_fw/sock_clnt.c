@@ -40,6 +40,11 @@
 static struct kmem_cache *tfw_cli_conn_cache;
 static struct kmem_cache *tfw_tls_conn_cache;
 static int tfw_cli_cfg_ka_timeout = -1;
+/*
+ * Maximum size of memory used to store requests. Used for receive window size
+ * steering
+ */
+static size_t recv_window_sz;
 
 static inline struct kmem_cache *
 tfw_cli_cache(int type)
@@ -507,6 +512,24 @@ tfw_cfgop_keepalive_timeout(TfwCfgSpec *cs, TfwCfgEntry *ce)
 	return 0;
 }
 
+static int
+tfw_cfgop_window_sz(TfwCfgSpec *cs, TfwCfgEntry *ce)
+{
+	int r;
+	long val = 0;
+
+	cs->dest = &val;
+
+	if ((r = tfw_cfg_set_long(cs, ce)))
+		return r;
+
+	if (val > LONG_MAX / 1024)
+		recv_window_sz = ULONG_MAX;
+	else
+		recv_window_sz = val * 1024;
+
+	return 0;
+}
 
 static void
 tfw_cfgop_cleanup_sock_clnt(TfwCfgSpec *cs)
@@ -607,6 +630,15 @@ static TfwCfgSpec tfw_sock_clnt_specs[] = {
 		.handler = tfw_cfgop_keepalive_timeout,
 		.cleanup = tfw_cfgop_cleanup_sock_clnt,
 		.allow_repeat = false,
+	},
+	{
+		.name = "client_recv_window_size",
+		.deflt = "64", /* 64 KB */
+		.handler = tfw_cfgop_window_sz,
+		.spec_ext = &(TfwCfgSpecInt) {
+			.range = { 1, LONG_MAX },
+		},
+		.allow_none = true,
 	},
 	{ 0 }
 };
