@@ -200,6 +200,13 @@ tfw_http_resp_build_error(TfwHttpReq *req)
 	(void)req;
 }
 
+/* Custom version for testing purposes. */
+void
+tfw_tls_cfg_require(void)
+{
+	return;
+}
+
 /* setup/teardown helpers */
 
 static void
