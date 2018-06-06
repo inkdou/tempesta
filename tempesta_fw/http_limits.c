@@ -238,7 +238,7 @@ typedef struct {
 } FrangAcc;
 
 /* GFSM hooks priorities. */
-int prio0, prio1, prio3;
+int prio0, prio1, prio2, prio3;
 
 #define FRANG_CLI2ACC(c)	((FrangAcc *)(&(c)->class_prvt))
 #define FRANG_ACC2CLI(a)	container_of((TfwClassifierPrvt *)a,	\
@@ -1141,9 +1141,11 @@ tfw_http_limits_init(void)
 		goto err_fsm_resp;
 	}
 
+	/* TODO: #1028 rework frang_http_req_handler. */
 	prio0 = tfw_gfsm_register_hook(TFW_FSM_HTTP,
 				       TFW_GFSM_HOOK_PRIORITY_ANY,
-				       TFW_HTTP_FSM_REQ_MSG, TFW_FSM_FRANG_REQ,
+				       TFW_HTTP_FSM_REQ_MSG_END,
+				       TFW_FSM_FRANG_REQ,
 				       TFW_FRANG_REQ_FSM_INIT);
 	if (prio0 < 0) {
 		TFW_ERR_NL("frang: can't register gfsm msg hook\n");
@@ -1152,29 +1154,45 @@ tfw_http_limits_init(void)
 	}
 	prio1 = tfw_gfsm_register_hook(TFW_FSM_HTTP,
 				       TFW_GFSM_HOOK_PRIORITY_ANY,
-				       TFW_HTTP_FSM_REQ_CHUNK, TFW_FSM_FRANG_REQ,
+				       TFW_HTTP_FSM_REQ_HEAD_CHUNK,
+				       TFW_FSM_FRANG_REQ,
 				       TFW_FRANG_REQ_FSM_INIT);
 	if (prio1 < 0) {
 		TFW_ERR_NL("frang: can't register gfsm chunk hook\n");
 		r = prio1;
 		goto err_hook2;
 	}
+	prio2 = tfw_gfsm_register_hook(TFW_FSM_HTTP,
+				       TFW_GFSM_HOOK_PRIORITY_ANY,
+				       TFW_HTTP_FSM_REQ_STREAM_CHUNK,
+				       TFW_FSM_FRANG_REQ,
+				       TFW_FRANG_REQ_FSM_INIT);
+	if (prio2 < 0) {
+		TFW_ERR_NL("frang: can't register gfsm chunk hook\n");
+		r = prio2;
+		goto err_hook3;
+	}
 	prio3 = tfw_gfsm_register_hook(TFW_FSM_HTTP,
 				       TFW_GFSM_HOOK_PRIORITY_ANY,
-				       TFW_HTTP_FSM_RESP_MSG_FWD,
+				       TFW_HTTP_FSM_RESP_MSG_END,
 				       TFW_FSM_FRANG_RESP,
 				       TFW_FRANG_RESP_FSM_INIT);
 	if (prio3 < 0) {
 		TFW_ERR_NL("frang: can't register gfsm msg fwd hook\n");
 		r = prio3;
-		goto err_hook3;
+		goto err_hook4;
 	}
 
 	return 0;
+err_hook4:
+	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio2,
+				 TFW_HTTP_FSM_REQ_STREAM_CHUNK);
 err_hook3:
-	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio1, TFW_HTTP_FSM_REQ_CHUNK);
+	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio1,
+				 TFW_HTTP_FSM_REQ_HEAD_CHUNK);
 err_hook2:
-	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio0, TFW_HTTP_FSM_REQ_MSG);
+	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio0,
+				 TFW_HTTP_FSM_REQ_MSG_END);
 err_hook:
 	tfw_gfsm_unregister_fsm(TFW_FSM_FRANG_RESP);
 err_fsm_resp:
@@ -1190,9 +1208,14 @@ tfw_http_limits_exit(void)
 {
 	TFW_DBG("frang exit\n");
 
-	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio3, TFW_HTTP_FSM_RESP_MSG_FWD);
-	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio1, TFW_HTTP_FSM_REQ_CHUNK);
-	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio0, TFW_HTTP_FSM_REQ_MSG);
+	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio3,
+				 TFW_HTTP_FSM_RESP_MSG_END);
+	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio2,
+				 TFW_HTTP_FSM_REQ_STREAM_CHUNK);
+	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio1,
+				 TFW_HTTP_FSM_REQ_HEAD_CHUNK);
+	tfw_gfsm_unregister_hook(TFW_FSM_HTTP, prio0,
+				 TFW_HTTP_FSM_REQ_MSG_END);
 	tfw_gfsm_unregister_fsm(TFW_FSM_FRANG_RESP);
 	tfw_gfsm_unregister_fsm(TFW_FSM_FRANG_REQ);
 	tfw_classifier_unregister();

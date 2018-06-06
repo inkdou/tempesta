@@ -1254,15 +1254,14 @@ int
 tfw_apm_hm_srv_check_body(TfwHttpResp *resp, bool parsed, void *apmref)
 {
 	TfwApmHM *hm = READ_ONCE(((TfwApmData *)apmref)->hmctl.hm);
-	size_t off = resp->state.body_off;
+	size_t off = resp->body_off;
 
 	BUG_ON(!hm);
 
 	if (!hm->crc32 && !hm->auto_crc)
 		return TFW_PASS;
 
-	resp->state.crc32 = __tfw_str_crc32_calc(&resp->body, off,
-						 resp->state.crc32);
+	resp->crc32 = __tfw_str_crc32_calc(&resp->body, off, resp->crc32);
 
 	if (!parsed)
 		return TFW_POSTPONE;
@@ -1271,15 +1270,15 @@ tfw_apm_hm_srv_check_body(TfwHttpResp *resp, bool parsed, void *apmref)
 	 * from body of the first response and store it into monitor.
 	 */
 	if (!hm->crc32 && hm->auto_crc) {
-		hm->crc32 = resp->state.crc32;
+		hm->crc32 = resp->crc32;
 		return TFW_PASS;
 	}
-	if (hm->crc32 == resp->state.crc32)
+	if (hm->crc32 == resp->crc32)
 		return TFW_PASS;
 
 	TFW_WARN("Response for health monitor '%s': crc32 value "
 		 "'%u' mismatched (expected value: '%u')\n",
-		 hm->name, resp->state.crc32, hm->crc32);
+		 hm->name, resp->crc32, hm->crc32);
 
 	return TFW_BLOCK;
 }

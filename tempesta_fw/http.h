@@ -65,22 +65,48 @@ enum {
 	/* HTTP FSM initial state, not hookable. */
 	TFW_HTTP_FSM_INIT		= TFW_GFSM_HTTP_STATE(0),
 
-	/* Called on request End-Of-Skb (EOS). */
-	TFW_HTTP_FSM_REQ_CHUNK		= TFW_GFSM_HTTP_STATE(1),
+	/* Request. */
+	/* A new request is received, hookable state. */
+	TFW_HTTP_FSM_REQ_NEW		= TFW_GFSM_HTTP_STATE(1),
+	/*
+	 * Request headers End-Of-Skb (EOS), request is buffered until the
+	 * header is fully read.
+	 */
+	TFW_HTTP_FSM_REQ_HEAD_CHUNK	= TFW_GFSM_HTTP_STATE(2),
+
+	/* Request headers are read. Called before processing the headers. */
+	TFW_HTTP_FSM_REQ_HEAD_END	= TFW_GFSM_HTTP_STATE(3),
 
 	/* Whole request is read. */
-	TFW_HTTP_FSM_REQ_MSG		= TFW_GFSM_HTTP_STATE(2),
+	TFW_HTTP_FSM_REQ_MSG_END	= TFW_GFSM_HTTP_STATE(4),
 
-	/* Called on response EOS. */
-	TFW_HTTP_FSM_RESP_CHUNK		= TFW_GFSM_HTTP_STATE(3),
+	/* Forward request to backend or cache. */
+	TFW_HTTP_FSM_REQ_FWD		= TFW_GFSM_HTTP_STATE(5),
+
+	/* Request body/trailer End-Of-Skb (EOS). */
+	TFW_HTTP_FSM_REQ_STREAM_CHUNK	= TFW_GFSM_HTTP_STATE(6),
+
+	/* Response. */
+	/* A new response is received, hookable state. */
+	TFW_HTTP_FSM_RESP_NEW		= TFW_GFSM_HTTP_STATE(7),
+
+	/* Response headers EOS. */
+	TFW_HTTP_FSM_RESP_HEAD_CHUNK	= TFW_GFSM_HTTP_STATE(8),
+
+	/* Response headers are fully read. */
+	TFW_HTTP_FSM_RESP_HEAD_END	= TFW_GFSM_HTTP_STATE(9),
 
 	/* Whole response is read. */
-	TFW_HTTP_FSM_RESP_MSG		= TFW_GFSM_HTTP_STATE(4),
+	TFW_HTTP_FSM_RESP_MSG_END	= TFW_GFSM_HTTP_STATE(10),
 
-	/* Run just before locally generated response sending. */
-	TFW_HTTP_FSM_LOCAL_RESP_FILTER	= TFW_GFSM_HTTP_STATE(5),
+	/* Forward response to client. */
+	TFW_HTTP_FSM_RESP_FWD		= TFW_GFSM_HTTP_STATE(11),
 
-	TFW_HTTP_FSM_RESP_MSG_FWD	= TFW_GFSM_HTTP_STATE(6),
+	/* Response body/trailer End-Of-Skb (EOS). */
+	TFW_HTTP_FSM_RESP_STREAM_CHUNK	= TFW_GFSM_HTTP_STATE(12),
+
+	/* Response is fully streamed. */
+	TFW_HTTP_FSM_RESP_STREAM_DONE	= TFW_GFSM_HTTP_STATE(13),
 
 	TFW_HTTP_FSM_DONE	= TFW_GFSM_HTTP_STATE(TFW_GFSM_STATE_LAST)
 };
@@ -302,6 +328,8 @@ enum {
 	TFW_HTTP_B_STREAM,
 	/* Message is processed in streaming mode: Message is fully sent. */
 	TFW_HTTP_B_STREAM_DONE,
+	/* Message is fully processed. */
+	TFW_HTTP_B_PROCESSED,
 
 	/* Request flags. */
 	TFW_HTTP_FLAGS_REQ,
@@ -350,6 +378,7 @@ enum {
 #define TFW_HTTP_F_FIELD_DUPENTRY	(1U << TFW_HTTP_B_FIELD_DUPENTRY)
 #define TFW_HTTP_F_STREAM		(1U << TFW_HTTP_B_STREAM)
 #define TFW_HTTP_F_STREAM_DONE		(1U << TFW_HTTP_B_STREAM_DONE)
+#define TFW_HTTP_F_PROCESSED		(1U << TFW_HTTP_B_PROCESSED)
 
 #define TFW_HTTP_F_HAS_STICKY		(1U << TFW_HTTP_B_HAS_STICKY)
 #define TFW_HTTP_F_URI_FULL		(1U << TFW_HTTP_B_URI_FULL)
@@ -379,23 +408,6 @@ typedef struct {
 	unsigned short	status;
 }TfwHttpError;
 
-/**
- * Message processing state.
- *
- * @st			- current processing state;
- * @body_off		- offset of current valid body part;
- * @crc32		- crc32 value for health monitoring;
- *
- * When the message is streamed, not all TfwStr chunks of hm->body are valid.
- * Previous chunks may be already sent and underlying skbs may be destroyed,
- * later chunks was not received yet.
- */
-typedef struct {
-	unsigned int	st;
-	size_t		body_off;
-	u32		crc32;
-} TfwHttpMsgState;
-
 typedef struct tfw_http_msg_t	TfwHttpMsg;
 typedef struct tfw_http_req_t	TfwHttpReq;
 typedef struct tfw_http_resp_t	TfwHttpResp;
@@ -419,6 +431,7 @@ typedef struct tfw_http_resp_t	TfwHttpResp;
  *			  allowed. Use atomic operations if concurrent
  *			  updates are possible;
  * @content_length	- the value of Content-Length header field;
+ * @body_off		- offset of current valid body part for streamed message;
  * @keep_alive		- the value of timeout specified in Keep-Alive header;
  * @conn		- connection which the message was received on;
  * @destructor		- called when a connection is destroyed;
@@ -426,6 +439,10 @@ typedef struct tfw_http_resp_t	TfwHttpResp;
  * @body		- pointer to the body of a message;
  *
  * TfwStr members must be the last for efficient scanning.
+ *
+ * When the message is streamed, not all TfwStr chunks of hm->body are valid.
+ * Previous chunks may be already sent and underlying skbs may be destroyed,
+ * Body data is valid only starting from @body_off.
  */
 #define TFW_HTTP_MSG_COMMON						\
 	TfwMsg		msg;						\
@@ -438,11 +455,11 @@ typedef struct tfw_http_resp_t	TfwHttpResp;
 	};								\
 	TfwHttpParser	parser;						\
 	TfwHttpError	httperr;					\
-	TfwHttpMsgState	state;						\
 	TfwCacheControl	cache_ctl;					\
 	unsigned char	version;					\
 	unsigned int	flags;						\
 	unsigned long	content_length;					\
+	size_t		body_off;					\
 	unsigned int	keep_alive;					\
 	TfwConn		*conn;						\
 	void (*destructor)(void *msg);					\
@@ -528,12 +545,19 @@ struct tfw_http_req_t {
  * HTTP Response.
  * TfwStr members must be the first for efficient scanning.
  *
- * @jrxtstamp	- time the message has been received, in jiffies;
+ * @s_line		- status string;
+ * @status		- HTTP status code;
+ * @crc32		- crc32 value for health monitoring;
+ * @date		- date and time at which the message was originated;
+ * @last_modified	- date and time at which the origin server believes
+ *			  the resource was last modified;
+ * @jrxtstamp		- time the message has been received, in jiffies;
  */
 struct tfw_http_resp_t {
 	TFW_HTTP_MSG_COMMON;
 	TfwStr			s_line;
 	unsigned short		status;
+	u32			crc32;
 	time_t			date;
 	time_t			last_modified;
 	unsigned long		jrxtstamp;
